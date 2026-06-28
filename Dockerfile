@@ -41,9 +41,9 @@ COPY config.example.yaml ./config.default.yaml
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-# Persistent mount point: bucket data
-# 持久化挂载点：记忆数据
-VOLUME ["/app/buckets"]
+# Bucket data is mounted by the deployment platform at /app/buckets.
+# Railway rejects Dockerfile VOLUME directives; configure the persistent
+# volume in the service instead.
 
 # Default to streamable-http for container (remote access)
 # 容器场景默认用 streamable-http
