@@ -21,7 +21,8 @@ tools/breath/importance.py — importance_min 模式
 """
 
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from utils import count_tokens_approx
+from .render import render_local
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -31,7 +32,12 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
     return all(t in bucket_tags for t in tag_filter)
 
 
-async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_by_importance(
+    importance_min: int,
+    max_results: int,
+    max_tokens: int,
+    tag_filter: list,
+) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
@@ -44,7 +50,7 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
         and _bucket_has_tags(b.get("metadata", {}), tag_filter)
     ]
     filtered.sort(key=lambda b: int(b.get("metadata", {}).get("importance") or 0), reverse=True)
-    filtered = filtered[:20]
+    filtered = filtered[:max_results]
     if not filtered:
         return f"没有重要度 >= {importance_min} 的记忆。"
     results = []
@@ -54,21 +60,13 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
             break
         try:
             clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-            try:
-                summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-            except Exception as dehy_err:
-                rt.logger.warning(f"importance_min dehydrate failed / 脱水失败: {dehy_err}")
-                is_pinned = b["metadata"].get("pinned") or b["metadata"].get("protected")
-                if is_pinned:
-                    # pinned 桶脱水失败时降级展示原文，确保核心准则可见
-                    summary = strip_wikilinks(b["content"])[:300].strip() or "（空记忆）"
-                else:
-                    continue
-            t = count_tokens_approx(summary)
+            remaining = max_tokens - token_used
+            summary = render_local(b["content"], clean_meta, max(1, remaining - 24))
+            rendered = f"[importance:{b['metadata'].get('importance', 0)}] [bucket_id:{b['id']}] {summary}"
+            t = count_tokens_approx(rendered)
             if token_used + t > max_tokens:
                 break
-            imp = b["metadata"].get("importance", 0)
-            results.append(f"[importance:{imp}] [bucket_id:{b['id']}] {summary}")
+            results.append(rendered)
             token_used += t
         except Exception as e:
             rt.logger.warning(f"importance_min bucket processing failed: {e}")

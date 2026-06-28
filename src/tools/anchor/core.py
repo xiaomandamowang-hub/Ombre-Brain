@@ -53,9 +53,11 @@ async def anchor_release(bucket_id: str) -> str:
     return f"我把它从 anchor 移开了。它会重新参与默认浮现。当前 {result['count']}/{result['limit']}。"
 
 
-async def pulse(include_archive: Optional[bool] = False) -> str:
+async def pulse(include_archive: Optional[bool] = False, details: Optional[bool] = False) -> str:
     if include_archive is None:
         include_archive = False
+    if details is None:
+        details = False
     await rt.decay_engine.ensure_started()
     try:
         stats = await rt.bucket_mgr.get_stats()
@@ -72,6 +74,9 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         f"总占用: {stats['total_size_kb']:.1f} KB\n"
         f"衰减引擎: {'运行中' if rt.decay_engine.is_running else '已停止'}\n"
     )
+
+    if not details:
+        return status + "调用 pulse(details=true) 可查看完整桶列表。"
 
     # --- 索引/存储一致性检查（iter 2.1+）---
     # 桶文件落在磁盘但 embedding 缺失 → breath 走向量检索时会丢这些桶；

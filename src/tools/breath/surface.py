@@ -28,7 +28,8 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from utils import count_tokens_approx
+from .render import render_local
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -63,15 +64,28 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     ]
     pinned_ids = {b["id"] for b in pinned_buckets}
     pinned_results = []
+    pinned_token_used = 0
     for b in pinned_buckets:
+        remaining = max_tokens - pinned_token_used
+        if remaining <= 0:
+            break
         try:
             clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-            summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-            pinned_results.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
+            prefix = f"📌 [核心准则] [bucket_id:{b['id']}] "
+            summary = render_local(
+                b["content"], clean_meta,
+                max(1, remaining - count_tokens_approx(prefix)),
+            )
+            rendered = prefix + summary
+            rendered_tokens = count_tokens_approx(rendered)
+            if rendered_tokens > remaining:
+                break
+            pinned_results.append(rendered)
+            pinned_token_used += rendered_tokens
         except Exception as e:
             rt.logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
             # 降级：直接展示原文片段，确保核心准则永远可见
-            fallback = strip_wikilinks(b["content"])[:300].strip() or "（空记忆）"
+            fallback = render_local(b["content"], b["metadata"], max(1, max_tokens))
             pinned_results.append(f"📌 [核心准则] [bucket_id:{b['id']}] {fallback}")
 
     # --- iter 2.0: anchor 桶在默认浮现模式的 *未解决池* 不出现（anchor 是坐标系不是浮现对象）---
@@ -132,9 +146,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     scored_with_cold = cold_start + scored_deduped
 
     # --- 按 token 预算浮现，加权采样 / 随机洗牌 + 硬上限 ---
-    token_budget = max_tokens
-    for r in pinned_results:
-        token_budget -= count_tokens_approx(r)
+    token_budget = max_tokens - pinned_token_used
 
     candidates = list(scored_with_cold)
     sampling_cfg = surfacing_cfg.get("sampling", {}) or {}
@@ -192,7 +204,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             break
         try:
             clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-            summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+            summary = render_local(b["content"], clean_meta, max(1, token_budget))
             summary_tokens = count_tokens_approx(summary)
             if summary_tokens > token_budget:
                 break
@@ -250,7 +262,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             for b in passive_pool[:2]:
                 try:
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                    summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                    summary = render_local(b["content"], clean_meta, max(1, token_budget))
                     passive_results.append(f"💤 [久未浮现] [bucket_id:{b['id']}] {summary}")
                 except Exception as e:
                     rt.logger.warning(f"passive association dehydrate failed: {e}")
@@ -276,7 +288,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                 for b in resolved_pool[:3]:
                     try:
                         clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                        summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                        summary = render_local(b["content"], clean_meta, max(1, token_budget))
                         dream_results.append(f"✨ [偶遇] [bucket_id:{b['id']}] {summary}")
                         rt.logger.info(f"Dream surface triggered / 偶遇机制触发: {b['id']}")
                     except Exception as e:

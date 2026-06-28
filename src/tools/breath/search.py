@@ -26,7 +26,8 @@ embedding_engine 向量近邻，结果合并去重，逐条 dehydrate 后塞 tok
 import random
 
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from utils import count_tokens_approx
+from .render import render_local
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -83,6 +84,8 @@ async def surface_search(
     except Exception as e:
         rt.logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
+    matches = matches[:max_results]
+
     results = []
     token_used = 0
     for bucket in matches:
@@ -95,20 +98,25 @@ async def surface_search(
                 original_v = float(clean_meta.get("valence") or 0.5)
                 shift = (q_valence - 0.5) * 0.2
                 clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
-            summary_tokens = count_tokens_approx(summary)
-            if token_used + summary_tokens > max_tokens:
-                break
-            await rt.bucket_mgr.touch(bucket["id"])
             meta_b = bucket["metadata"]
             if meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent":
-                summary = f"📌 [核心准则] [bucket_id:{bucket['id']}] {summary}"
+                prefix = f"📌 [核心准则] [bucket_id:{bucket['id']}] "
             elif bucket.get("vector_match"):
-                summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
+                prefix = f"[语义关联] [bucket_id:{bucket['id']}] "
             else:
-                summary = f"[bucket_id:{bucket['id']}] {summary}"
-            results.append(summary)
-            token_used += summary_tokens
+                prefix = f"[bucket_id:{bucket['id']}] "
+            remaining = max_tokens - token_used
+            summary = render_local(
+                bucket["content"], clean_meta,
+                max(1, remaining - count_tokens_approx(prefix)),
+            )
+            rendered = prefix + summary
+            rendered_tokens = count_tokens_approx(rendered)
+            if token_used + rendered_tokens > max_tokens:
+                break
+            await rt.bucket_mgr.touch(bucket["id"])
+            results.append(rendered)
+            token_used += rendered_tokens
         except Exception as e:
             rt.logger.error(
                 f"Failed to dehydrate search result / 检索结果脱水失败: {type(e).__name__}: {e}",
@@ -132,7 +140,7 @@ async def surface_search(
                 drift_results = []
                 for b in drifted:
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                    summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                    summary = render_local(b["content"], clean_meta, max(1, max_tokens - token_used))
                     drift_results.append(f"[surface_type: random]\n{summary}")
                 results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
         except Exception as e:

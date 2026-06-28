@@ -164,6 +164,8 @@ def load_config(config_path: Optional[str] = None) -> dict:
 
     # 压缩组（脱水/打标/合并）—— 写到 config["dehydration"][*]
     _apply_env_override(config, "OMBRE_COMPRESS_API_KEY", "dehydration", "api_key")
+    if not os.environ.get("OMBRE_COMPRESS_API_KEY", "").strip():
+        _apply_env_override(config, "OMBRE_API_KEY", "dehydration", "api_key")
     _apply_env_override(config, "OMBRE_COMPRESS_BASE_URL", "dehydration", "base_url")
     _apply_env_override(config, "OMBRE_COMPRESS_MODEL", "dehydration", "model")
     # Accept both names: OMBRE_COMPRESS_FORMAT (dashboard) and OMBRE_COMPRESS_API_FORMAT (legacy)
@@ -172,6 +174,8 @@ def load_config(config_path: Optional[str] = None) -> dict:
 
     # 向量化组（embedding）—— 写到 config["embedding"][*]
     _apply_env_override(config, "OMBRE_EMBED_API_KEY", "embedding", "api_key")
+    if not os.environ.get("OMBRE_EMBED_API_KEY", "").strip():
+        _apply_env_override(config, "OMBRE_API_KEY", "embedding", "api_key")
     _apply_env_override(config, "OMBRE_EMBED_BASE_URL", "embedding", "base_url")
     _apply_env_override(config, "OMBRE_EMBED_MODEL", "embedding", "model")
     _apply_env_override(config, "OMBRE_EMBED_FORMAT", "embedding", "api_format")

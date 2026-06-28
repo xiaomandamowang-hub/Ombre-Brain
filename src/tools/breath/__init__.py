@@ -82,6 +82,7 @@ async def dispatch(
     if importance_min >= 1:
         return await surface_by_importance(
             importance_min=importance_min,
+            max_results=max_results,
             max_tokens=max_tokens,
             tag_filter=tag_filter,
         )

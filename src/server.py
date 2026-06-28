@@ -676,12 +676,15 @@ async def release(bucket_id: str) -> str:
 
 
 @mcp_extra.tool()
-async def pulse(include_archive: Optional[bool] = False) -> str:
-    """我看一眼自己的记忆系统：固化/动态/衰减/归档桶数量、总占用、衰减引擎是否在跑,以及所有桶的摘要列表。include_archive=True 顺便看归档区。"""
+async def pulse(
+    include_archive: Optional[bool] = False,
+    details: Optional[bool] = False,
+) -> str:
+    """我看一眼自己的记忆系统。默认只返回数量、占用和引擎状态，保证快速响应；details=True 才列出全部桶。include_archive=True 在详细列表中包含归档区。"""
     return await _with_notice(
-        _t_anchor.pulse(include_archive=include_archive),
+        _t_anchor.pulse(include_archive=include_archive, details=details),
         op="pulse",
-        args={"include_archive": include_archive},
+        args={"include_archive": include_archive, "details": details},
     )
 
 
