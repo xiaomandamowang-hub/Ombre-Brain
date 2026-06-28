@@ -25,6 +25,7 @@ import urllib.parse as _urlparse
 import base64 as _base64
 import hashlib as _hashlib_oauth
 import html as _html_escape
+from contextvars import ContextVar
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -36,6 +37,12 @@ logger = sh.logger
 _oauth_clients: dict[str, dict] = {}
 _oauth_codes: dict[str, dict] = {}    # code -> {client_id, redirect_uri, code_challenge, expires}
 _mcp_tokens: dict[str, float] = {}    # token -> expiry timestamp
+
+# Per-request auth state is set by the HTTP middleware.  Defaulting to true
+# preserves stdio/local transports, which do not pass through that middleware.
+_mcp_request_auth: ContextVar[tuple[bool, str]] = ContextVar(
+    "ombre_mcp_request_auth", default=(True, "")
+)
 
 _OAUTH_CODE_TTL = 300               # 5 min
 _MCP_TOKEN_TTL = 86400 * 36500      # 100 年（实际永久）
@@ -97,6 +104,11 @@ def _is_valid_mcp_token(token: str) -> bool:
     return True
 
 
+def _get_mcp_request_auth() -> tuple[bool, str]:
+    """Return (is_authenticated, resource_metadata_url) for this request."""
+    return _mcp_request_auth.get()
+
+
 def _mcp_auth_check(request: Request):
     """Return True if request has a valid MCP Bearer token."""
     auth = request.headers.get("Authorization", "")
@@ -106,7 +118,8 @@ def _mcp_auth_check(request: Request):
 
 
 def _oauth_authorize_html(client_id: str, redirect_uri: str, state: str,
-                           code_challenge: str, error: str = "") -> str:
+                           code_challenge: str, resource: str = "",
+                           scope: str = "mcp", error: str = "") -> str:
     e = _html_escape.escape
     err_html = f'<p style="color:#ff6b6b;font-size:13px;margin-top:12px;">{e(error)}</p>' if error else ""
     return f"""<!DOCTYPE html>
@@ -135,6 +148,8 @@ button:hover{{background:#d4b87a}}
 <input type="hidden" name="redirect_uri" value="{e(redirect_uri)}">
 <input type="hidden" name="state" value="{e(state)}">
 <input type="hidden" name="code_challenge" value="{e(code_challenge)}">
+<input type="hidden" name="resource" value="{e(resource)}">
+<input type="hidden" name="scope" value="{e(scope)}">
 <input type="password" name="password" placeholder="输入 Dashboard 密码" autofocus>
 <button type="submit">授权并连接</button>
 </form>
@@ -159,6 +174,7 @@ def register(mcp) -> None:
         return JSONResponse({
             "resource": resource,
             "authorization_servers": [base],
+            "scopes_supported": ["mcp"],
             "bearer_methods_supported": ["header"],
         })
 
@@ -208,6 +224,7 @@ def register(mcp) -> None:
             return HTMLResponse(_oauth_authorize_html(
                 p.get("client_id", ""), p.get("redirect_uri", ""),
                 p.get("state", ""), p.get("code_challenge", ""),
+                p.get("resource", ""), p.get("scope", "mcp"),
             ))
         # POST
         form = await request.form()
@@ -216,17 +233,20 @@ def register(mcp) -> None:
         redirect_uri = str(form.get("redirect_uri", ""))
         state        = str(form.get("state", ""))
         code_challenge = str(form.get("code_challenge", ""))
+        resource     = str(form.get("resource", ""))
+        requested_scope = str(form.get("scope", "mcp"))
 
         if not sh._verify_any_password(password):
             return HTMLResponse(_oauth_authorize_html(
-                client_id, redirect_uri, state, code_challenge, error="密码错误，请重试"
+                client_id, redirect_uri, state, code_challenge, resource,
+                requested_scope, error="密码错误，请重试"
             ), status_code=401)
 
         client_info = _oauth_clients.get(client_id)
         if client_info and redirect_uri not in client_info.get("redirect_uris", []):
             return HTMLResponse(_oauth_authorize_html(
-                client_id, redirect_uri, state, code_challenge,
-                error="redirect_uri 与注册不符，拒绝授权"
+                client_id, redirect_uri, state, code_challenge, resource,
+                requested_scope, error="redirect_uri 与注册不符，拒绝授权"
             ), status_code=400)
 
         code = secrets.token_urlsafe(32)
@@ -234,6 +254,8 @@ def register(mcp) -> None:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "code_challenge": code_challenge,
+            "resource": resource,
+            "scope": requested_scope,
             "expires": _time_mod.time() + _OAUTH_CODE_TTL,
         }
         sep = "&" if "?" in redirect_uri else "?"
@@ -260,11 +282,17 @@ def register(mcp) -> None:
 
         code = str(body.get("code", ""))
         code_verifier = str(body.get("code_verifier", ""))
+        resource = str(body.get("resource", ""))
         code_data = _oauth_codes.pop(code, None)
         if not code_data:
             return JSONResponse({"error": "invalid_grant", "error_description": "unknown or expired code"}, status_code=400)
         if code_data["expires"] < _time_mod.time():
             return JSONResponse({"error": "invalid_grant", "error_description": "code expired"}, status_code=400)
+        if code_data.get("resource") and resource != code_data["resource"]:
+            return JSONResponse({
+                "error": "invalid_target",
+                "error_description": "resource does not match the authorization request",
+            }, status_code=400)
 
         if code_data.get("code_challenge"):
             if not code_verifier or not _verify_pkce(code_verifier, code_data["code_challenge"]):
@@ -277,5 +305,5 @@ def register(mcp) -> None:
             "access_token": token,
             "token_type": "Bearer",
             "expires_in": _MCP_TOKEN_TTL,
-            "scope": "mcp",
+            "scope": code_data.get("scope") or "mcp",
         })
