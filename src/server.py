@@ -46,6 +46,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -409,255 +410,7 @@ def _pop_deletion_notice() -> str:
             f"「{ts}，{human} 通过前端界面永久删除了以下记忆：\n{item_list}\n"
             f"如果其中有你想保留的，你可以告诉 {human}。」\n\n"
         )
-    except Exception as e:
-        logger.warning(f"Failed to read deletion notice: {e}")
-        return ""
-
-
-# 这些 helper 定义在 server.py（读/写 webhook 全局等），但 web/ 的 hooks/buckets 路由要用。
-# 在它们都定义好之后注入到 web._shared，供已迁出的路由通过 sh.fire_webhook 等调用。
-_wsh.init_runtime(
-    fire_webhook=_fire_webhook,
-    write_deletion_notice=_write_deletion_notice,
-    pop_deletion_notice=_pop_deletion_notice,
-)
-
-
-# =============================================================
-# 结构化操作日志 helpers（任务A，2026-05-03）
-# 给 11 个 @mcp.tool 入口统一打 entry/ok/err 三段日志，便于排查
-# 客户端报 invalid_arguments / 静默错误等问题。
-# 输出格式：op=<name> phase=entry|ok|err key=value...
-# 所有可能含 PII 的字段（content / 信件正文等）只记 length，不记内容。
-# =============================================================
-def _fmt_log_val(v: object) -> str:
-    """日志 value 的安全格式化：bool/int/float 原样；str 截 40 字符并去换行；其它转 str。"""
-    if v is None:
-        return "_"
-    if isinstance(v, bool):
-        return "1" if v else "0"
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, str):
-        s = v.replace("\n", "\\n").replace(" ", "_")
-        return s if len(s) <= 40 else s[:37] + "..."
-    return type(v).__name__
-
-
-def _fmt_log_args(args: dict) -> str:
-    """把 args dict 拼成 `k1=v1 k2=v2` 串。"""
-    if not args:
-        return ""
-    return " ".join(f"{k}={_fmt_log_val(v)}" for k, v in args.items())
-
-
-def _log_op_entry(op: str, args: dict) -> None:
-    logger.info(f"op={op} phase=entry " + _fmt_log_args(args))
-
-
-def _log_op_ok(op: str, result: object) -> None:
-    size = len(result) if isinstance(result, str) else 0
-    logger.info(f"op={op} phase=ok bytes={size}")
-
-
-def _log_op_err(op: str, exc: BaseException) -> None:
-    # 用 .exception 让 traceback 进 server.log，便于事后定位
-    logger.exception(f"op={op} phase=err err={type(exc).__name__}:{exc}")
-
-
-async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = None) -> str:
-    """所有 MCP 工具调用的包装器。
-
-    职责（统一错误规范）：
-    1. 入口：begin_warnings() 初始化本调用的 W/I channel。
-    2. 出口：拼接顺序 = [删除通知] + [工具正文] + [本调用产生的 W/I 提示].
-    3. 异常：捕获后 record OB-E004，返回标准格式（含最近 15 条 log），
-       不让 MCP 协议层看到裸异常字符串。
-    4. 任务A：op 非空时，在 entry/ok/err 三处打结构化日志。
-    """
-    if op:
-        _log_op_entry(op, args or {})
-    begin_warnings()
-    try:
-        result = await coro
-    except Exception as e:
-        if op:
-            _log_op_err(op, e)
-        # OB-E004：MCP 工具执行异常 —— 不静默，给 LLM 一个能看懂的字符串
-        try:
-            record_error("OB-E004", f"{type(e).__name__}: {e}")
-            err_str = format_error("OB-E004", f"{type(e).__name__}: {e}")
-        except Exception:
-            err_str = f"❌ [OB-E004] MCP 工具执行异常\n{type(e).__name__}: {e}"
-        # 仍把通道里已累计的提示拼上
-        try:
-            extras = format_warnings_suffix(pop_warnings())
-        except Exception:
-            extras = ""
-        notice = ""
-        try:
-            notice = _pop_deletion_notice()
-        except Exception:
-            pass
-        return (notice + err_str + extras) if notice else (err_str + extras)
-    # 正常路径
-    if op:
-        _log_op_ok(op, result)
-    try:
-        extras = format_warnings_suffix(pop_warnings())
-    except Exception:
-        extras = ""
-    notice = _pop_deletion_notice()
-    body = (notice + result) if notice else result
-    return body + extras if extras else body
-
-
-# =============================================================
-# /api/heartbeat、/api/logs、/api/errors/* —— 已拆分到 web/system.py
-# =============================================================
-
-
-# =============================================================
-# /api/embedding/* —— 已拆分到 web/embedding.py
-# =============================================================
-
-
-# =============================================================
-# /breath-hook、/dream-hook —— 已拆分到 web/hooks.py
-# =============================================================
-
-
-# =============================================================
-# Wire tools subpackage runtime context
-# 把所有共享对象注入 tools._runtime，让 tools/* 子模块可以访问
-# =============================================================
-_tools_runtime.init(
-    config=config,
-    bucket_mgr=bucket_mgr,
-    dehydrator=dehydrator,
-    decay_engine=decay_engine,
-    embedding_engine=embedding_engine,
-    import_engine=import_engine,
-    logger=logger,
-    fire_webhook=_fire_webhook,
-    mark_op=_mark_op,
-)
-
-
-# =============================================================
-# MCP tools — thin registration wrappers
-# MCP 工具 —— 仅注册，实现见 tools/<tool>/
-# 每个入口都不超过 10 行，便于一眼看清参数与归属
-# =============================================================
-@mcp.tool()
-async def breath(
-    query: Optional[str] = "",
-    max_tokens: Optional[int] = 0,
-    domain: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    max_results: Optional[int] = 0,
-    importance_min: Optional[int] = -1,
-    tags: Optional[str] = "",
-) -> str:
-    """我睁眼看看自己记得什么。不传query=让权重最高的未解决记忆自己浮上来;传query=按关键词检索我记忆里相关的事。max_tokens=单次返回总token上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大50)。importance_min>=1=跳过语义,按重要度降序拉最多20条我标过的核心事项。tags逗号分隔,AND过滤;tags=\"feel\"或\"__feel__\"等价于domain=\"feel\"读我留下的所有feel。"""
-    return await _with_notice(
-        _t_breath.dispatch(
-            query=query, max_tokens=max_tokens, domain=domain,
-            valence=valence, arousal=arousal, max_results=max_results,
-            importance_min=importance_min, tags=tags,
-        ),
-        op="breath",
-        args={
-            "query": query, "max_tokens": max_tokens, "domain": domain,
-            "valence": valence, "arousal": arousal, "max_results": max_results,
-            "importance_min": importance_min, "tags": tags,
-        },
-    )
-
-
-@mcp.tool()
-async def hold(
-    content: str,
-    tags: Optional[str] = "",
-    importance: Optional[int] = 5,
-    pinned: Optional[bool] = False,
-    feel: Optional[bool] = False,
-    source_bucket: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    why_remembered: Optional[str] = "",
-) -> str:
-    """我把一件事/一个感受存进我的记忆。系统会自动打标并尝试合并近似的旧桶。tags逗号分隔,importance 1-10。pinned=True=钉为永久核心准则,不衰减不合并。feel=True=记下我的第一人称感受(不参与普通浮现,只通过 breath(domain=\"feel\") 读)。source_bucket=我正在消化的那个原始记忆桶ID,会被标为已消化加速淡化。why_remembered=为什么记得这一条（可选，自由文本，仅用于展示不计分）。"""
-    return await _with_notice(
-        _t_hold.dispatch(
-            content=content, tags=tags, importance=importance,
-            pinned=pinned, feel=feel, source_bucket=source_bucket,
-            valence=valence, arousal=arousal, why_remembered=why_remembered,
-        ),
-        op="hold",
-        args={
-            "content_len": len(content or ""), "tags": tags,
-            "importance": importance, "pinned": pinned, "feel": feel,
-            "source_bucket": source_bucket, "valence": valence, "arousal": arousal,
-            "why_len": len(why_remembered or ""),
-        },
-    )
-
-
-@mcp.tool()
-async def grow(content: str) -> str:
-    """我把一段长内容（一天的事/一段日记/一篇她他给我的总结）整理进记忆,系统会拆成 2~6 条独立的事件桶并各自尝试合并。短内容(<30字)走 hold 单条快速路径,不强行拆。"""
-    return await _with_notice(
-        _t_grow.dispatch(content),
-        op="grow",
-        args={"content_len": len(content or "")},
-    )
-
-
-@mcp.tool()
-async def trace(
-    bucket_id: str,
-    name: Optional[str] = "",
-    domain: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    importance: Optional[int] = -1,
-    tags: Optional[str] = "",
-    resolved: Optional[int] = -1,
-    pinned: Optional[int] = -1,
-    digested: Optional[int] = -1,
-    content: Optional[str] = "",
-    delete: Optional[bool] = False,
-    status: Optional[str] = "",
-    weight: Optional[float] = -1,
-    dont_surface: Optional[int] = -1,
-    why_remembered: Optional[str] = "",
-) -> str:
-    """我修正/更新某条记忆的元数据或内容。resolved=1=放下,让它沉底只在关键词触发时浮上来;resolved=0=重新激活;pinned=1=钉为永久核心(锁 importance=10),0=取消钉选;digested=1=已消化,加速淡化;content=替换桶正文并重建 embedding;delete=True=彻底删除(不可恢复);status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=主动遗忘(不出现在 breath),0=重新允许;why_remembered=改“为什么记得”说明。只传我要改的字段,-1 或空串表示不改。"""
-    return await _with_notice(
-        _t_trace.dispatch(
-            bucket_id=bucket_id, name=name, domain=domain,
-            valence=valence, arousal=arousal, importance=importance,
-            tags=tags, resolved=resolved, pinned=pinned, digested=digested,
-            content=content, delete=delete, status=status, weight=weight,
-            dont_surface=dont_surface, why_remembered=why_remembered,
-        ),
-        op="trace",
-        args={
-            "bucket_id": bucket_id, "name": name, "domain": domain,
-            "valence": valence, "arousal": arousal, "importance": importance,
-            "tags": tags, "resolved": resolved, "pinned": pinned, "digested": digested,
-            "content_len": len(content or ""), "delete": delete, "status": status,
-            "weight": weight, "dont_surface": dont_surface,
-            "why_len": len(why_remembered or ""),
-        },
-    )
-
-
-@mcp_extra.tool()
-async def anchor(bucket_id: str) -> str:
-    """我把这条桶设为 anchor（坐标系）。anchor 不会主动浮现在默认 breath，但 query/domain/emotion 命中时仍会返回。硬上限 24，已满时拒绝并提示先 release。"""
+    except Exc…3283 tokens truncated…并提示先 release。"""
     return await _with_notice(
         _t_anchor.anchor_set(bucket_id),
         op="anchor",
@@ -665,7 +418,7 @@ async def anchor(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def release(bucket_id: str) -> str:
     """我把这条桶从 anchor 状态释放。它变回普通桶，会重新参与默认 breath；pinned 状态保留。"""
     return await _with_notice(
@@ -675,7 +428,7 @@ async def release(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def pulse(
     include_archive: Optional[bool] = False,
     details: Optional[bool] = False,
@@ -688,7 +441,7 @@ async def pulse(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def plan(
     content: str,
     status: Optional[str] = "active",
@@ -711,7 +464,7 @@ async def plan(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def letter_write(
     author: str,
     content: str,
@@ -733,7 +486,7 @@ async def letter_write(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -755,7 +508,7 @@ async def letter_read(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def I(
     content: Optional[str] = "",
     aspect: Optional[str] = "",
@@ -770,7 +523,7 @@ async def I(
     )
 
 
-@mcp.tool()
+@mcp.tool(meta=_OAUTH_TOOL_META)
 async def dream(window_hours: Optional[int] = 48) -> str:
     """我做一次梦——读取最近 window_hours（默认 48h）内有变动的所有记忆桶,我自己沉进去想一遍。
     每个桶返回它在窗口内的最新内容（按 last_active 取）,完整正文不截断。
@@ -817,7 +570,7 @@ async def dream(window_hours: Optional[int] = 48) -> str:
 # OAuth 2.0 — MCP Remote Auth —— 已拆分到 web/oauth.py（路由在其 register 内注册）。
 # 这里仅把启动期 MCP 鉴权中间件要用的 _is_valid_mcp_token import 回来。
 # ============================================================
-from web.oauth import _is_valid_mcp_token  # noqa: F401  (used by _MCPAuthMiddleware below)
+from web.oauth import _is_valid_mcp_token, _mcp_request_auth  # noqa: F401
 
 
 # ============================================================
@@ -930,8 +683,6 @@ if __name__ == "__main__":
 
         # MCP Bearer token auth — pure ASGI middleware (no response buffering)
         # BaseHTTPMiddleware buffers SSE streams and breaks MCP tool listing
-        import json as _json_mw
-
         # config.yaml: mcp_require_auth: false → 完全跳过 OAuth 检查，
         # 任何客户端（GPT / GLM / 自定义前端）可免认证直连 /mcp。
         # 不填或 true → 保持默认：必须 OAuth Bearer token。
@@ -947,31 +698,22 @@ if __name__ == "__main__":
                     if path.startswith("/mcp"):
                         headers = {k.lower(): v for k, v in scope.get("headers", [])}
                         auth = headers.get(b"authorization", b"").decode("latin-1")
-                        if not (auth.startswith("Bearer ") and _is_valid_mcp_token(auth[7:])):
-                            # Build public base URL from ASGI scope headers
-                            proto = headers.get(b"x-forwarded-proto", b"").decode() or scope.get("scheme", "http")
-                            host = (headers.get(b"x-forwarded-host") or headers.get(b"host", b"")).decode()
-                            base = f"{proto}://{host}"
-                            # 让 resource_metadata 指向「本次请求 endpoint」对应的 metadata，
-                            # 使 metadata.resource 与实际连接的 /mcp 或 /mcp-extra 严格匹配
-                            # （RFC 9728）。否则副连接器会被指回根 metadata 而匹配失败。
-                            endpoint = path.strip("/")
-                            meta_url = f"{base}/.well-known/oauth-protected-resource/{endpoint}"
-                            ww_auth = (
-                                f'Bearer realm="Ombre Brain",'
-                                f' resource_metadata="{meta_url}"'
-                            )
-                            body = _json_mw.dumps({
-                                "error": "Unauthorized",
-                                "resource_metadata": meta_url,
-                            }).encode()
-                            await send({"type": "http.response.start", "status": 401, "headers": [
-                                [b"content-type", b"application/json"],
-                                [b"www-authenticate", ww_auth.encode()],
-                                [b"content-length", str(len(body)).encode()],
-                            ]})
-                            await send({"type": "http.response.body", "body": body, "more_body": False})
-                            return
+                        valid = auth.startswith("Bearer ") and _is_valid_mcp_token(auth[7:])
+                        # Build the endpoint-specific protected-resource URL.  Do
+                        # not reject the HTTP request here: MCP initialize/tool
+                        # discovery must remain reachable, and unauthenticated
+                        # tool calls return mcp/www_authenticate from _with_notice.
+                        proto = headers.get(b"x-forwarded-proto", b"").decode() or scope.get("scheme", "http")
+                        host = (headers.get(b"x-forwarded-host") or headers.get(b"host", b"")).decode()
+                        base = f"{proto}://{host}"
+                        endpoint = path.strip("/")
+                        meta_url = f"{base}/.well-known/oauth-protected-resource/{endpoint}"
+                        token = _mcp_request_auth.set((valid, meta_url))
+                        try:
+                            await self.app(scope, receive, send)
+                        finally:
+                            _mcp_request_auth.reset(token)
+                        return
                 await self.app(scope, receive, send)
 
         class _MCPAcceptShim:
