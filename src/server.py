@@ -46,6 +46,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -465,7 +466,7 @@ def _log_op_err(op: str, exc: BaseException) -> None:
     logger.exception(f"op={op} phase=err err={type(exc).__name__}:{exc}")
 
 
-async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = None) -> str:
+async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = None) -> str | CallToolResult:
     """所有 MCP 工具调用的包装器。
 
     职责（统一错误规范）：
@@ -475,6 +476,26 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
        不让 MCP 协议层看到裸异常字符串。
     4. 任务A：op 非空时，在 entry/ok/err 三处打结构化日志。
     """
+    # ChatGPT needs a tool-level MCP challenge to open the OAuth linking UI.
+    # A bare HTTP 401 is rendered as the generic "error in message stream".
+    if bool(config.get("mcp_require_auth", True)):
+        from web.oauth import _get_mcp_request_auth
+        authenticated, meta_url = _get_mcp_request_auth()
+        if not authenticated:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            challenge = (
+                f'Bearer resource_metadata="{meta_url}", scope="mcp", '
+                'error="insufficient_scope", '
+                'error_description="Log in to Ombre Brain to continue"'
+            )
+            return CallToolResult(
+                content=[TextContent(type="text", text="Authentication required. Please connect Ombre Brain.")],
+                isError=True,
+                _meta={"mcp/www_authenticate": [challenge]},
+            )
+
     if op:
         _log_op_entry(op, args or {})
     begin_warnings()
@@ -549,7 +570,12 @@ _tools_runtime.init(
 # MCP 工具 —— 仅注册，实现见 tools/<tool>/
 # 每个入口都不超过 10 行，便于一眼看清参数与归属
 # =============================================================
-@mcp.tool()
+_OAUTH_TOOL_META = {
+    "securitySchemes": [{"type": "oauth2", "scopes": ["mcp"]}],
+}
+
+
+@mcp.tool(meta=_OAUTH_TOOL_META)
 async def breath(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -576,7 +602,7 @@ async def breath(
     )
 
 
-@mcp.tool()
+@mcp.tool(meta=_OAUTH_TOOL_META)
 async def hold(
     content: str,
     tags: Optional[str] = "",
@@ -605,7 +631,7 @@ async def hold(
     )
 
 
-@mcp.tool()
+@mcp.tool(meta=_OAUTH_TOOL_META)
 async def grow(content: str) -> str:
     """我把一段长内容（一天的事/一段日记/一篇她他给我的总结）整理进记忆,系统会拆成 2~6 条独立的事件桶并各自尝试合并。短内容(<30字)走 hold 单条快速路径,不强行拆。"""
     return await _with_notice(
@@ -615,7 +641,7 @@ async def grow(content: str) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(meta=_OAUTH_TOOL_META)
 async def trace(
     bucket_id: str,
     name: Optional[str] = "",
@@ -655,7 +681,7 @@ async def trace(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def anchor(bucket_id: str) -> str:
     """我把这条桶设为 anchor（坐标系）。anchor 不会主动浮现在默认 breath，但 query/domain/emotion 命中时仍会返回。硬上限 24，已满时拒绝并提示先 release。"""
     return await _with_notice(
@@ -665,7 +691,7 @@ async def anchor(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def release(bucket_id: str) -> str:
     """我把这条桶从 anchor 状态释放。它变回普通桶，会重新参与默认 breath；pinned 状态保留。"""
     return await _with_notice(
@@ -675,7 +701,7 @@ async def release(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def pulse(
     include_archive: Optional[bool] = False,
     details: Optional[bool] = False,
@@ -688,7 +714,7 @@ async def pulse(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def plan(
     content: str,
     status: Optional[str] = "active",
@@ -711,7 +737,7 @@ async def plan(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def letter_write(
     author: str,
     content: str,
@@ -733,7 +759,7 @@ async def letter_write(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -755,7 +781,7 @@ async def letter_read(
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(meta=_OAUTH_TOOL_META)
 async def I(
     content: Optional[str] = "",
     aspect: Optional[str] = "",
@@ -770,7 +796,7 @@ async def I(
     )
 
 
-@mcp.tool()
+@mcp.tool(meta=_OAUTH_TOOL_META)
 async def dream(window_hours: Optional[int] = 48) -> str:
     """我做一次梦——读取最近 window_hours（默认 48h）内有变动的所有记忆桶,我自己沉进去想一遍。
     每个桶返回它在窗口内的最新内容（按 last_active 取）,完整正文不截断。
@@ -817,7 +843,7 @@ async def dream(window_hours: Optional[int] = 48) -> str:
 # OAuth 2.0 — MCP Remote Auth —— 已拆分到 web/oauth.py（路由在其 register 内注册）。
 # 这里仅把启动期 MCP 鉴权中间件要用的 _is_valid_mcp_token import 回来。
 # ============================================================
-from web.oauth import _is_valid_mcp_token  # noqa: F401  (used by _MCPAuthMiddleware below)
+from web.oauth import _is_valid_mcp_token, _mcp_request_auth  # noqa: F401
 
 
 # ============================================================
@@ -930,8 +956,6 @@ if __name__ == "__main__":
 
         # MCP Bearer token auth — pure ASGI middleware (no response buffering)
         # BaseHTTPMiddleware buffers SSE streams and breaks MCP tool listing
-        import json as _json_mw
-
         # config.yaml: mcp_require_auth: false → 完全跳过 OAuth 检查，
         # 任何客户端（GPT / GLM / 自定义前端）可免认证直连 /mcp。
         # 不填或 true → 保持默认：必须 OAuth Bearer token。
@@ -947,31 +971,21 @@ if __name__ == "__main__":
                     if path.startswith("/mcp"):
                         headers = {k.lower(): v for k, v in scope.get("headers", [])}
                         auth = headers.get(b"authorization", b"").decode("latin-1")
-                        if not (auth.startswith("Bearer ") and _is_valid_mcp_token(auth[7:])):
-                            # Build public base URL from ASGI scope headers
-                            proto = headers.get(b"x-forwarded-proto", b"").decode() or scope.get("scheme", "http")
-                            host = (headers.get(b"x-forwarded-host") or headers.get(b"host", b"")).decode()
-                            base = f"{proto}://{host}"
-                            # 让 resource_metadata 指向「本次请求 endpoint」对应的 metadata，
-                            # 使 metadata.resource 与实际连接的 /mcp 或 /mcp-extra 严格匹配
-                            # （RFC 9728）。否则副连接器会被指回根 metadata 而匹配失败。
-                            endpoint = path.strip("/")
-                            meta_url = f"{base}/.well-known/oauth-protected-resource/{endpoint}"
-                            ww_auth = (
-                                f'Bearer realm="Ombre Brain",'
-                                f' resource_metadata="{meta_url}"'
-                            )
-                            body = _json_mw.dumps({
-                                "error": "Unauthorized",
-                                "resource_metadata": meta_url,
-                            }).encode()
-                            await send({"type": "http.response.start", "status": 401, "headers": [
-                                [b"content-type", b"application/json"],
-                                [b"www-authenticate", ww_auth.encode()],
-                                [b"content-length", str(len(body)).encode()],
-                            ]})
-                            await send({"type": "http.response.body", "body": body, "more_body": False})
-                            return
+                        valid = auth.startswith("Bearer ") and _is_valid_mcp_token(auth[7:])
+                        # Keep MCP initialize/tool discovery reachable.  An
+                        # unauthenticated tool call returns mcp/www_authenticate
+                        # from _with_notice so ChatGPT can open its linking UI.
+                        proto = headers.get(b"x-forwarded-proto", b"").decode() or scope.get("scheme", "http")
+                        host = (headers.get(b"x-forwarded-host") or headers.get(b"host", b"")).decode()
+                        base = f"{proto}://{host}"
+                        endpoint = path.strip("/")
+                        meta_url = f"{base}/.well-known/oauth-protected-resource/{endpoint}"
+                        token = _mcp_request_auth.set((valid, meta_url))
+                        try:
+                            await self.app(scope, receive, send)
+                        finally:
+                            _mcp_request_auth.reset(token)
+                        return
                 await self.app(scope, receive, send)
 
         class _MCPAcceptShim:
