@@ -66,23 +66,32 @@ async def surface_search(
     matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
 
     # --- 向量通道 ---
-    matched_ids = {b["id"] for b in matches}
-    try:
-        vector_results = await rt.embedding_engine.search_similar(query, top_k=max(max_results, 20))
-        for bucket_id, sim_score in vector_results:
-            if bucket_id not in matched_ids and sim_score > 0.65:
-                bucket = await rt.bucket_mgr.get(bucket_id)
-                if (
-                    bucket
-                    and bucket["metadata"].get("type") not in ("feel", "plan", "letter", "archived")
-                    and _bucket_has_tags(bucket["metadata"], tag_filter)
-                ):
-                    bucket["score"] = round(sim_score * 100, 2)
-                    bucket["vector_match"] = True
-                    matches.append(bucket)
-                    matched_ids.add(bucket_id)
-    except Exception as e:
-        rt.logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
+    # A complete keyword result set already satisfies the request.  Avoid the
+    # remote embedding API in that case: a slow or rejected provider must not
+    # turn an exact local-memory hit into an upstream timeout.
+    if len(matches) < max_results:
+        matched_ids = {b["id"] for b in matches}
+        try:
+            vector_results = await rt.embedding_engine.search_similar(
+                query, top_k=max(max_results, 20)
+            )
+            for bucket_id, sim_score in vector_results:
+                if bucket_id not in matched_ids and sim_score > 0.65:
+                    bucket = await rt.bucket_mgr.get(bucket_id)
+                    if (
+                        bucket
+                        and bucket["metadata"].get("type")
+                        not in ("feel", "plan", "letter", "archived")
+                        and _bucket_has_tags(bucket["metadata"], tag_filter)
+                    ):
+                        bucket["score"] = round(sim_score * 100, 2)
+                        bucket["vector_match"] = True
+                        matches.append(bucket)
+                        matched_ids.add(bucket_id)
+        except Exception as e:
+            rt.logger.warning(
+                f"Vector search failed, using keyword only / 向量搜索失败: {e}"
+            )
 
     matches = matches[:max_results]
 

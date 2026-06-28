@@ -88,11 +88,12 @@ def test_query_search_never_calls_dehydration_api(monkeypatch):
     )
     monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(rt, "dehydrator", dehydrator)
-    monkeypatch.setattr(
-        rt,
-        "embedding_engine",
-        SimpleNamespace(search_similar=AsyncMock(return_value=[])),
+    embedding_engine = SimpleNamespace(
+        search_similar=AsyncMock(
+            side_effect=AssertionError("exact keyword hit called embedding API")
+        )
     )
+    monkeypatch.setattr(rt, "embedding_engine", embedding_engine)
     monkeypatch.setattr(rt, "fire_webhook", None)
     monkeypatch.setattr(rt, "logger", MagicMock())
     monkeypatch.setattr(search_module.random, "random", lambda: 1.0)
@@ -111,4 +112,5 @@ def test_query_search_never_calls_dehydration_api(monkeypatch):
 
     assert "潘小满" in result
     dehydrator.dehydrate.assert_not_awaited()
+    embedding_engine.search_similar.assert_not_awaited()
     bucket_mgr.touch.assert_awaited_once_with("abc123def456")
