@@ -410,9 +410,7 @@ def _pop_deletion_notice() -> str:
             f"「{ts}，{human} 通过前端界面永久删除了以下记忆：\n{item_list}\n"
             f"如果其中有你想保留的，你可以告诉 {human}。」\n\n"
         )
-    except Exc…3283 tokens truncated…并提示先 release。"""
-    return await _with_notice(
-        _t_anchor.anchor_set(bucket_id),
+    except…3324 tokens truncated….anchor_set(bucket_id),
         op="anchor",
         args={"bucket_id": bucket_id},
     )
