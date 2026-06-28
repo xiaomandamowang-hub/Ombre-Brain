@@ -38,6 +38,26 @@ async def test_unauthenticated_tool_call_returns_chatgpt_oauth_challenge():
     assert "error_description=" in challenge
 
 
+
+@pytest.mark.asyncio
+async def test_fastmcp_preserves_oauth_challenge_for_string_tools():
+    previous = server.config.get("mcp_require_auth", True)
+    server.config["mcp_require_auth"] = True
+    token = oauth._mcp_request_auth.set((
+        False,
+        "https://example.test/.well-known/oauth-protected-resource/mcp",
+    ))
+    try:
+        result = await server.mcp._tool_manager.call_tool(
+            "breath", {}, convert_result=True,
+        )
+    finally:
+        oauth._mcp_request_auth.reset(token)
+        server.config["mcp_require_auth"] = previous
+
+    assert isinstance(result, CallToolResult)
+    assert result.meta["mcp/www_authenticate"]
+
 def test_authorization_form_preserves_resource_and_scope():
     html = oauth._oauth_authorize_html(
         "client", "https://chatgpt.com/connector/oauth/callback", "state",
