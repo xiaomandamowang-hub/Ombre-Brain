@@ -575,7 +575,7 @@ _OAUTH_TOOL_META = {
 }
 
 
-@mcp.tool(meta=_OAUTH_TOOL_META)
+@mcp.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def breath(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -602,7 +602,7 @@ async def breath(
     )
 
 
-@mcp.tool(meta=_OAUTH_TOOL_META)
+@mcp.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def hold(
     content: str,
     tags: Optional[str] = "",
@@ -631,7 +631,7 @@ async def hold(
     )
 
 
-@mcp.tool(meta=_OAUTH_TOOL_META)
+@mcp.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def grow(content: str) -> str:
     """我把一段长内容（一天的事/一段日记/一篇她他给我的总结）整理进记忆,系统会拆成 2~6 条独立的事件桶并各自尝试合并。短内容(<30字)走 hold 单条快速路径,不强行拆。"""
     return await _with_notice(
@@ -641,7 +641,7 @@ async def grow(content: str) -> str:
     )
 
 
-@mcp.tool(meta=_OAUTH_TOOL_META)
+@mcp.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def trace(
     bucket_id: str,
     name: Optional[str] = "",
@@ -681,7 +681,7 @@ async def trace(
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def anchor(bucket_id: str) -> str:
     """我把这条桶设为 anchor（坐标系）。anchor 不会主动浮现在默认 breath，但 query/domain/emotion 命中时仍会返回。硬上限 24，已满时拒绝并提示先 release。"""
     return await _with_notice(
@@ -691,7 +691,7 @@ async def anchor(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def release(bucket_id: str) -> str:
     """我把这条桶从 anchor 状态释放。它变回普通桶，会重新参与默认 breath；pinned 状态保留。"""
     return await _with_notice(
@@ -701,7 +701,7 @@ async def release(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def pulse(
     include_archive: Optional[bool] = False,
     details: Optional[bool] = False,
@@ -714,7 +714,7 @@ async def pulse(
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def plan(
     content: str,
     status: Optional[str] = "active",
@@ -737,7 +737,7 @@ async def plan(
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def letter_write(
     author: str,
     content: str,
@@ -759,7 +759,7 @@ async def letter_write(
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -781,7 +781,7 @@ async def letter_read(
     )
 
 
-@mcp_extra.tool(meta=_OAUTH_TOOL_META)
+@mcp_extra.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def I(
     content: Optional[str] = "",
     aspect: Optional[str] = "",
@@ -796,7 +796,7 @@ async def I(
     )
 
 
-@mcp.tool(meta=_OAUTH_TOOL_META)
+@mcp.tool(meta=_OAUTH_TOOL_META, structured_output=False)
 async def dream(window_hours: Optional[int] = 48) -> str:
     """我做一次梦——读取最近 window_hours（默认 48h）内有变动的所有记忆桶,我自己沉进去想一遍。
     每个桶返回它在窗口内的最新内容（按 last_active 取）,完整正文不截断。
