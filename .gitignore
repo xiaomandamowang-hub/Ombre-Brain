@@ -1,13 +1,21 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# OS / 工具产生的杂物（曾被误提交，2026-06 清理）
+.DS_Store
+.coverage
+.coverage.*
+config.yaml.dir/
 .env
 .venv/
-.claude/settings.local.json
-.claude/hooks/__pycache__/
+.venv*/
+venv/
+.claude/
 .vscode/
 config.yaml
 buckets/
+test_buckets/
 *.log
 server.log
 plan.md
@@ -16,6 +24,32 @@ backup_*/
 *.db
 import_state.json
 data/
+
+# 内部沟通 / 设计稿 / 复盘 / 迭代 spec —— 不上传
+# Internal design docs, reflections, iteration specs — local only
+docs/internal/
+docs/secret/
+
+# 测试 & 维护工具 —— 不上传（需要时本地维护）
 tests/integration/
 tests/regression/
 tests/unit/
+/tools/
+
+rule.md
+models/
+test_analyze.py
+test_flow.py
+
+# 一次性诊断 / 部署脚本 —— 本地用，不上传
+tmp/
+diag*.py
+fix_key.py
+check_cfg.py
+start_stdio.sh
+
+# Ollama 模型权重 —— 体积大，不上传
+ollama/
+
+# 本地设计预览稿（非应用文件）
+frontend/dashboard-preview.html

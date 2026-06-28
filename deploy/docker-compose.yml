@@ -1,0 +1,37 @@
+﻿# Ombre Brain — 开发 / VPS 部署
+# 从本地源码构建镜像，适合 VPS 直接 rsync + compose up
+#
+# 用法：
+#   cd /opt/ombre-brain
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# 敏感 key 通过环境变量传入（不要写进此文件）：
+#   export OMBRE_COMPRESS_API_KEY=...
+#   export OMBRE_EMBED_API_KEY=...
+#   export OMBRE_DASHBOARD_PASSWORD=...
+
+services:
+  ombre-brain:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ombre-brain
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - OMBRE_TRANSPORT=streamable-http
+      # 覆盖镜像默认（/app/buckets/config.yaml）：VPS 仍用下方的 /app/config.yaml 文件挂载，
+      # 现网 config.yaml（含 key）就在那儿，别让它被忽略。根文件系统可写，不受只读限制。
+      - OMBRE_CONFIG_PATH=/app/config.yaml
+      - OMBRE_EMBED_BACKEND=${OMBRE_EMBED_BACKEND:-api}
+      - OMBRE_COMPRESS_API_KEY=${OMBRE_COMPRESS_API_KEY}
+      - OMBRE_COMPRESS_BASE_URL=${OMBRE_COMPRESS_BASE_URL:-}
+      - OMBRE_COMPRESS_MODEL=${OMBRE_COMPRESS_MODEL:-}
+      - OMBRE_EMBED_API_KEY=${OMBRE_EMBED_API_KEY:-}
+      - OMBRE_EMBED_BASE_URL=${OMBRE_EMBED_BASE_URL:-}
+      - OMBRE_EMBED_MODEL=${OMBRE_EMBED_MODEL:-}
+      - OMBRE_DASHBOARD_PASSWORD=${OMBRE_DASHBOARD_PASSWORD}
+    volumes:
+      - /opt/ombre-brain/buckets:/app/buckets
+      - /opt/ombre-brain/config.yaml:/app/config.yaml

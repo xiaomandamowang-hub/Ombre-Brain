@@ -14,6 +14,20 @@ transport: "stdio"
 # --- Log level / 日志级别 ---
 log_level: "INFO"
 
+# --- MCP remote auth / MCP 远程鉴权开关 ---
+# true  (默认): HTTPS 连接 /mcp 时强制走 OAuth 2.1 + PKCE（Claude.ai 网页版需要）。
+# false: 完全跳过 OAuth，任何客户端（自有前端 / GPT / GLM / 自定义脚本）可免认证直连 /mcp。
+# 把 OB 接进自己的前端、调用 MCP 工具被 OAuth 卡住时，设为 false 即可。
+# 也可用环境变量 OMBRE_MCP_REQUIRE_AUTH=false 覆盖（Docker 用户更方便，优先级最高）。
+# ⚠️ 关掉后请确保服务不直接暴露公网，或在反代层另加鉴权——否则任何人都能读写记忆。
+# true (default): force OAuth 2.1 + PKCE on HTTPS /mcp connections (required by claude.ai web).
+# false: skip OAuth entirely so any client (your own frontend / GPT / GLM / custom scripts)
+#        can hit /mcp without auth. Set this when integrating OB into your own frontend and
+#        OAuth blocks your MCP tool calls. Env var OMBRE_MCP_REQUIRE_AUTH=false also works.
+# ⚠️ When disabled, do not expose the service directly to the public internet without
+#    another auth layer at the reverse proxy — otherwise anyone can read/write memories.
+mcp_require_auth: true
+
 # --- Bucket storage path / 记忆桶存储路径 ---
 # Point this to your Obsidian vault subdirectory, or any local folder
 # 指向你的 Obsidian 仓库子目录，或任意本地文件夹
@@ -45,7 +59,7 @@ dehydration:
   #   LM Studio:   http://localhost:1234/v1
   #   vLLM:        http://localhost:8000/v1
   #   Gemini:      https://generativelanguage.googleapis.com/v1beta/openai
-  # api_key: ""    # ⚠️ Use env var OMBRE_API_KEY instead / 请使用环境变量 OMBRE_API_KEY
+  # api_key: ""    # ⚠️ Use env var OMBRE_COMPRESS_API_KEY instead / 请使用环境变量 OMBRE_COMPRESS_API_KEY
   max_tokens: 1024
   temperature: 0.1
 
@@ -61,16 +75,14 @@ decay:
     arousal_boost: 0.8            # Arousal boost coefficient / 唤醒度加成系数
 
 # --- Embedding / 向量化配置 ---
-# Uses embedding API for semantic similarity search
-# 通过 embedding API 实现语义相似度搜索
-# You can configure embedding independently from dehydration.
-# If api_key is omitted, reuses the same API key (OMBRE_API_KEY) and base_url from dehydration config
-# 你可以把 embedding 独立配置；若 api_key 留空，复用脱水配置的 API key 和 base_url
+# 使用 OpenAI 兼容的云端 API（如 Gemini）进行向量化。
+# 需要在环境变量中设置 OMBRE_EMBED_API_KEY。
 embedding:
   enabled: true                   # Enable embedding / 启用向量化
-  model: "gemini-embedding-001"   # Embedding model / 向量化模型
-  # base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
-  # api_key: ""                  
+  backend: "api"                  # 只支持 api（OpenAI 兼容端点）
+  model: "gemini-embedding-001"   # 云端模型名（如 gemini-embedding-001）
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  # api_key: ""                   # Use OMBRE_EMBED_API_KEY / 使用 OMBRE_EMBED_API_KEY
 
 # --- Scoring weights / 检索权重参数 ---
 # total = topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
@@ -84,6 +96,42 @@ scoring_weights:
 matching:
   fuzzy_threshold: 50             # Minimum match score (0-100) / 最低匹配分数
   max_results: 5                  # Max results per search / 单次搜索最多返回条数
+
+# --- Surfacing defaults / 浮现默认参数 ---
+# Defaults applied when Claude calls breath() without explicit caps.
+# Front-end Settings panel writes the same fields back here.
+# Claude 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
+surfacing:
+  breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
+  breath_max_tokens: 10000        # 500-20000, total token cap per breath
+  feel_max_tokens: 6000           # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
+  # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。
+  # 测试 fixture 里默认关 (enabled=false)，保证排序确定。生产可以开。
+  sampling:
+    enabled: false                # true = 启用加权采样；false = 退化为 top1+shuffle 原行为
+    top_k: 5                      # 候选池大小
+    sample_k: 2                   # 抽出几个
+    temperature: 0.7              # >1 更平均、<1 更偏向高分；0.7 是个温和的默认
+
+# --- Limits / 边界限制（iter 1.6 §5）---
+# Single-bucket size cap and pinned bucket quota. Exceeding either is
+# rejected at hold/grow/trace boundaries with a Chinese hint string.
+# 单桶字节上限 + pinned 桶数量上限。超出时在 hold/grow/trace 入口直接拒绝。
+limits:
+  max_bucket_bytes: 51200         # 50KB; 0 disables check
+  max_pinned: 20                  # max pinned buckets; 0 disables check
+
+# --- iter 1.9 G: 桶类型默认值 / per-type frontmatter defaults ---
+# Applied at create() time only when caller doesn't pass that field.
+# 写入时若调用方未显式传入对应字段，使用此处默认值。
+# 设计意图：letter 天然有重量、信件天然不该被静音；plan 默认中等承诺。
+bucket_type_defaults:
+  letter:
+    weight: 1.0
+    dont_surface: false
+  plan:
+    weight: 0.5
 
 # --- Obsidian wikilinks / Obsidian 双链自动注入 ---
 wikilink:

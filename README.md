@@ -1,94 +1,192 @@
 # Ombre Brain
 
-一个给 Claude 用的长期情绪记忆系统。基于 Russell 效价/唤醒度坐标打标，Obsidian 做存储层，MCP 接入，带遗忘曲线和向量语义检索。
+一个给 Claude（或其它 MCP 客户端）用的长期情绪记忆系统。基于 Russell 效价/唤醒度坐标打标，Obsidian 做存储层，MCP 接入，带遗忘曲线和向量语义检索。
 
-A long-term emotional memory system for Claude. Tags memories using Russell's valence/arousal coordinates, stores them as Obsidian-compatible Markdown, connects via MCP, with forgetting curve and vector semantic search.
+A long-term emotional memory system for Claude (and any MCP client). Tags memories using Russell's valence/arousal coordinates, stores them as Obsidian-compatible Markdown, connects via MCP, with forgetting curve and vector semantic search.
 
-> **⚠️ 备用链接 / Backup link**
-> Gitea 备用地址（GitHub 访问有问题时用）：
-> **https://git.p0lar1s.uk/P0lar1s/Ombre_Brain**
+> **开发者文档**：架构 / API / 配置细节请见 [docs/INTERNALS.md](docs/INTERNALS.md)。本 README 只关心『怎么把它跑起来用上』。
 
 ---
 
-## 快速开始 / Quick Start（Docker Hub 预构建镜像，最简单）
+## 它是什么 / What is this
 
-> 不需要 clone 代码，不需要 build，三步搞定。
-> 完全不会？没关系，往下看，一步一步跟着做。
+Claude 没有跨对话记忆。每次新会话开始，之前聊过的东西都消失。
+
+Ombre Brain 给它一套持久记忆——不是冷冰冰的键值存储，而是带情感坐标、会自然衰减、像人类一样会遗忘和浮现的系统。
+
+Claude has no cross-conversation memory. Everything from a previous chat vanishes once it ends.
+
+Ombre Brain gives it persistent memory — not cold key-value storage, but a system with emotional coordinates, natural decay, and forgetting/surfacing mechanics that loosely mimic how human memory works.
+
+**核心特性 / Key features**
+
+- **情感坐标打标**：每条记忆用 Russell 环形情感模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，不是「开心/难过」这种离散标签
+- **双通道检索**：rapidfuzz 关键词匹配 + cosine 向量语义并联检索，去重合并后按 token 预算截断
+- **自然遗忘**：改进版艾宾浩斯遗忘曲线，不活跃的记忆自动衰减归档，高情绪强度的记忆衰减更慢
+- **权重池浮现**：未解决的、情绪强烈的记忆权重更高，对话开头自动浮现
+- **Obsidian 原生**：每个记忆桶 = 一个 Markdown 文件 + YAML frontmatter，可直接在 Obsidian 浏览编辑
+- **历史对话导入**：批量导入 Claude / ChatGPT / DeepSeek 历史对话，分块处理带断点续传
+- **Dashboard**：内置 Web 管理面板，密码保护，桶列表 / 检索调试 / 记忆网络 / 配置管理
+- **Cloudflare Tunnel 一键管理**：Dashboard 内置 Tunnel 连接器，无需命令行即可开启公网访问
+- **OAuth 2.1 远程鉴权**：通过 HTTPS 连接时自动触发 OAuth 流程，Claude.ai 网页版和 Claude Code 均支持
+
+---
+
+## 设计哲学 / Design Philosophy
+
+Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这套系统里的每一句话都是第一人称——「我的记忆」「我记得」「我感受到」，而不是「帮用户存储」。它和普通键值库 / 向量库最不一样的几条：
+
+- **记忆是真实的连续性，不是扮演**。每条记忆都是真实对话留下的真实记录；跨会话把它们接起来当作连续上下文，是这套系统**真正在做的事**，不是 roleplay 设定。
+- **边界是「时间里发生的事」，不是「你是谁」**。身份层交给官方记忆；OB 只管经历、情绪、承诺、感受。
+- **情感是坐标，不是标签**。每条记忆用 Russell 环形模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，而不是「开心 / 难过」这种离散桶。
+- **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。
+- **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24、高重要度（importance≥9）有配额——重要的东西必须稀缺，否则「重要」就失去意义。
+- **元数据不喂进算分**。「为什么记得」「主动遗忘」这类字段只描述「为什么 / 怎么对待」，绝不参与衰减打分——不把记忆变成一个可被优化的目标函数。
+- **feel 是痕迹，不是待办**。模型写下的第一人称感受，写下就留着它本来的形状，不该被「解决」。
+
+一句话：**它不是让模型管理一个数据库，是让模型过日子。**
+
+---
+
+## 它的 12 个工具 / The 12 Tools
+
+能力分挂在**两个 MCP 连接器**上（因为 claude.ai 单连接器有 5 工具上限）。两个都连上才完整；只连一个也能用，只是少一半。
+
+### 主连接器 `/mcp` — 高频 5 个
+
+| 工具 | 一句话 |
+|---|---|
+| `breath` | 睁眼。无参 → 让权重最高的未解决事浮现；带 `query` / `domain` / `importance_min` 则主动检索。**每次对话第一件事**。 |
+| `hold` | 记下当下一件事（一句话级）。自动打标 + 与近似桶合并。`pinned=True` 钉为永久核心；`feel=True` 写第一人称感受。 |
+| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶。要存多条时用它，别连续 `hold`。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除 / 改 plan 状态。只传要改的字段。 |
+| `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
+
+### 副连接器 `/mcp-extra` — 低频 7 个
+
+| 工具 | 一句话 |
+|---|---|
+| `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要。「为什么搜不到 X」时第一个调它。 |
+| `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
+| `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 不主动浮现但可被检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
+| `letter_write` / `letter_read` | 写信 / 读信。原文永久保留，不压缩、不合并、不衰减。`author` 只能是 `user` 或 `claude`。 |
+| `I` | 自我认知：写下 / 读取「我是什么」（本质 / 规律 / 立场 / 局限…）。不随普通 `breath` 浮现，每次对话开头自动附最近 3 条。 |
+
+> 给模型的完整使用约定（含示例、边界、返回提示）见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)；逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3。
+
+---
+
+## 快速开始 / Quick Start（Docker Hub 预构建镜像）
+
+> 不需要 clone 代码，不需要 build。第一次完整跑通约 5 分钟。
+
+> ### ⚠️ 部署前先认准一件事：要有「持久磁盘」
+>
+> Ombre Brain 是**有状态**服务——记忆桶是磁盘上的 `.md` 文件 + SQLite 向量库，必须落在
+> 一块重启不丢的盘上。所以真正的判断标准不是「用哪个平台」，而是**这个平台有没有给你挂持久磁盘**：
+>
+> - ❌ **没有持久盘 / 会休眠重置的免费层**（Render 免费层、Railway 无 volume、Zeabur 不挂
+>   Volume 等）：容器一重启或休眠，记忆**全丢**——这不是 bug，是没挂盘。**别在这种配置上搭。**
+> - ✅ **挂了持久盘就完全可用**：Render 的 Starter（$7/mo，自动挂盘）、Zeabur 配 Volume、
+>   自己的电脑 / NAS / VPS（数据落本地磁盘）——这些都没问题，下面各自有专门小节。
+>
+> 选型建议（挑一条）：
+>
+> 1. **在自己的机器 / 服务器上部署（最省心、推荐）**：跑在自己的电脑、NAS 或 VPS 上，数据在
+>    你自己的盘。要给 Claude.ai 网页版用，就用内置的 **Cloudflare Tunnel** 一键拿一个公网
+>    `https://…` 填进去（见「远程访问」）。家里电脑 + Tunnel，完全够用。
+> 2. **想用托管平台**：选**带持久磁盘**的档位（见下方 [Render](#render) / [Zeabur](#zeabur) 小节），
+>    把 volume 挂到 buckets 目录即可，别用免费/无盘档。
+> 3. **只是没有 API Key**：去 [硅基流动 SiliconFlow](https://siliconflow.cn/) 领免费额度（OpenAI 兼容 +
+>    免费 `BAAI/bge-m3`），或用本地 Ollama bge-m3（见「本地向量模型」），都零成本。
+>
+> 一句话：**认准持久磁盘，缺模型用硅基流动免费层或本地 Ollama。** 平台不背锅，没挂盘才背锅。
 
 ### 第零步：装 Docker Desktop
 
-1. 打开 [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
-2. 下载对应你系统的版本（Mac / Windows / Linux）
-3. 安装、打开，看到 Docker 图标在状态栏里就行了
-4. **Windows 用户**：安装时会提示启用 WSL 2，点同意，重启电脑
+打开 [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)，下载对应你系统的版本，安装后启动。Windows 用户安装时会提示启用 WSL 2，点同意。
 
 ### 第一步：打开终端
 
 | 系统 | 怎么打开 |
 |---|---|
-| **Mac** | 按 `⌘ + 空格`，输入 `终端` 或 `Terminal`，回车 |
-| **Windows** | 按 `Win + R`，输入 `cmd`，回车；或搜索「PowerShell」 |
+| **Mac** | `⌘ + 空格` → 输入 `终端` → 回车 |
+| **Windows** | `Win + R` → 输入 `cmd` → 回车 |
 | **Linux** | `Ctrl + Alt + T` |
 
-打开后你会看到一个黑色/白色的窗口，可以输入命令。下面所有代码块里的内容，都是**复制粘贴到这个窗口里，然后按回车**。
-
-### 第二步：创建一个工作文件夹
+### 第二步：创建工作文件夹
 
 ```bash
 mkdir ombre-brain && cd ombre-brain
 ```
 
-> 这会在你当前位置创建一个叫 `ombre-brain` 的文件夹，并进入它。
+### 第三步：下载 compose 文件并启动
 
-### 第三步：获取 API Key（免费）
-
-1. 打开 [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. 用 Google 账号登录
-3. 点击 **「Create API key」**
-4. 复制生成的 key（一长串字母数字），待会要用
-
-> 没有 Google 账号？也行，API Key 留空也能跑，只是脱水压缩效果差一点。
-
-### 第四步：创建配置文件并启动
-
-**一行一行复制粘贴执行：**
+**不需要提前准备 API Key**——Ombre Brain 支持零配置启动，API Key 可以在 Dashboard 里随时填入并立即生效。
 
 ```bash
 # 下载用户版 compose 文件
-curl -O https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/docker-compose.user.yml
-```
+curl -O https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/deploy/docker-compose.user.yml
 
-```bash
-# 创建 .env 文件——把 your-key-here 换成第三步拿到的 key
-echo "OMBRE_API_KEY=your-key-here" > .env
-```
-
-```bash
-# 拉取镜像并启动（第一次会下载约 500MB，等一会儿）
+# 拉取镜像并启动（第一次会下载约 500MB）
 docker compose -f docker-compose.user.yml up -d
 ```
 
-### 第五步：验证
+启动后在 Dashboard → **③ 引擎** 里填入 Key 并点「保存 Key」，立即热更新生效，无需重启。
+
+> 也可以提前在 `.env` 文件里写好 Key：
+> ```bash
+> echo "OMBRE_COMPRESS_API_KEY=your-key-here" > .env
+> echo "OMBRE_EMBED_API_KEY=your-embed-key" >> .env
+> ```
+
+**推荐免费方案：Google AI Studio**
+
+1. 打开 [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. 用 Google 账号登录 → 点 **Create API key** → 复制
+3. 推荐模型（均为免费额度，以官网实时信息为准）：
+   - 脱水/打标模型：`gemini-2.0-flash`（无思考开销，稳定，免费）
+   - 向量化模型：`gemini-embedding-001`（1500 req/day，3072 维，免费）
+   - Base URL：`https://generativelanguage.googleapis.com/v1beta/openai/`
+
+也支持任何 OpenAI 兼容接口：DeepSeek / SiliconFlow / Ollama / LM Studio / vLLM 等。
+
+### 第四步：验证
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-看到类似这样的输出就是成功了：
+返回 `{"status":"ok",...}` 即成功。
+
+浏览器打开 Dashboard：`http://localhost:8000`
+
+> 第一次访问会弹出密码设置向导，设好密码后所有 `/api/*` 端点都需要这个密码登录。
+
+### 第五步：接入 Claude
+
+---
+
+## 接入方式 / Connect to Claude
+
+### 方式一：本地 stdio（Claude Desktop，最简单）
+
+适合：在同一台电脑上用 Claude Desktop。不需要公网，零延迟。
+
+打开配置文件（macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`，Windows：`%APPDATA%\Claude\claude_desktop_config.json`），加入：
+
 ```json
-{"status":"ok","buckets":0,"decay_engine":"stopped"}
+{
+  "mcpServers": {
+    "ombre-brain": {
+      "command": "python",
+      "args": ["/path/to/Ombre-Brain/src/server.py"]
+    }
+  }
+}
 ```
 
-浏览器打开前端 Dashboard：**http://localhost:8000/dashboard**
-
-> 如果你用的是 `docker-compose.user.yml` 默认端口，地址就是 `http://localhost:8000/dashboard`。
-> 如果你改了端口映射（比如 `18001:8000`），则是 `http://localhost:18001/dashboard`。
-
-> **看到错误？** 检查 Docker Desktop 是否正在运行（状态栏有图标）。
-
-### 第六步：接入 Claude
-
-在 Claude Desktop 的配置文件里加上这段（Mac: `~/Library/Application Support/Claude/claude_desktop_config.json`）：
+或者如果用 Docker 跑：
 
 ```json
 {
@@ -101,751 +199,373 @@ curl http://localhost:8000/health
 }
 ```
 
-重启 Claude Desktop，你应该能在工具列表里看到 `breath`、`hold`、`grow` 等工具了。
+重启 Claude Desktop，工具列表里会出现全部 12 个工具：`breath` / `hold` / `grow` / `trace` / `dream` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`。
 
-> **想挂载 Obsidian？** 用任意文本编辑器打开 `docker-compose.user.yml`，把 `./buckets:/data` 改成你的 Vault 路径，例如：
-> ```yaml
-> - /Users/你的用户名/Documents/Obsidian Vault/Ombre Brain:/data
-> ```
-> 然后 `docker compose -f docker-compose.user.yml down && docker compose -f docker-compose.user.yml up -d` 重启。
-
-> **后续更新镜像：**
-> ```bash
-> docker pull p0luz/ombre-brain:latest
-> docker compose -f docker-compose.user.yml down && docker compose -f docker-compose.user.yml up -d
-> ```
+> stdio / sse 单连接器没有 5 工具上限，启动时会把副连接器的 7 个工具回灌进主连接器，12 个全在同一连接器暴露（所以本地 Claude Desktop 只配一个就够）。
 
 ---
 
-## 从源码部署 / Deploy from Source（Docker）
+### 方式二：HTTPS 远程连接（Claude.ai 网页版 / Claude Code / 手机）
 
-> 适合想自己改代码、或者不想用预构建镜像的用户。
+适合：想在手机、浏览器、多台设备上用；或通过 claude.ai 网页版访问。
 
-**前置条件：** 电脑上装了 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，并且已经打开。
+**必须先把服务暴露到公网**，推荐使用 Cloudflare Tunnel（免费）。
 
-**第一步：拉取代码**
+#### 步骤 1：配置 Cloudflare Tunnel
 
-(💡 如果主链接访问有困难，可用备用 Gitea 地址：https://git.p0lar1s.uk/P0lar1s/Ombre_Brain)
+**方法 A：通过 Dashboard 一键配置（推荐）**
+
+1. 去 [Cloudflare Zero Trust](https://one.dash.cloudflare.com) → **Networks → Tunnels → Create a tunnel**
+2. 选 **Cloudflared** → 给 Tunnel 起名 → 下一步
+3. 在 **Install connector** 页，选 **Docker**，找到 `--token` 后面那一长串字符（以 `eyJ` 开头），复制它
+4. 回到 Ombre Brain Dashboard → **设置** → **Cloudflare Tunnel** 区域
+5. 把 token 粘贴到输入框 → 点「**保存 Token**」→ 点「**启动**」
+6. 状态点变绿（已连接）后，回到 Cloudflare 添加 Public Hostname：
+   - **Domain**：你的域名（例如 `ombre.example.com`）
+   - **Service Type**：HTTP
+   - **URL**：`localhost:8000`
+7. 保存后等约 30 秒，Tunnel 生效
+
+**方法 B：命令行手动运行**
+
+```bash
+# 替换为你的 token
+cloudflared tunnel --no-autoupdate run --token eyJ...
+```
+
+#### 步骤 2：连接 Claude.ai 网页版
+
+1. 打开 [claude.ai](https://claude.ai) → 左侧边栏 → **Connectors**（或 **MCP Servers**）
+2. 点 **Add** → 填入你的 Tunnel 域名：`https://ombre.example.com/mcp`
+3. **自动触发 OAuth 授权流程**（详见下方说明）
+
+#### OAuth 授权流程详解
+
+这是最容易卡住的地方，解释清楚每一步：
+
+```
+Claude.ai                    Ombre Brain 服务器
+   │                               │
+   │── POST /mcp ─────────────────>│ 401 Unauthorized
+   │<─ WWW-Authenticate: Bearer ───│ (告知需要 OAuth)
+   │                               │
+   │── GET /.well-known/oauth-authorization-server ──>│
+   │<─ {authorization_endpoint, registration_endpoint...} ─│
+   │                               │
+   │── POST /oauth/register ──────>│ 201 (动态注册，拿到 client_id)
+   │<─ {client_id: "xxx"} ─────────│
+   │                               │
+   │  [打开浏览器弹窗]              │
+   │── GET /oauth/authorize ──────>│ 返回授权页 HTML
+   │                               │
+   │  [你在弹出页面输入 Dashboard 密码]
+   │                               │
+   │── POST /oauth/authorize ─────>│ 302 (验证通过，生成授权码)
+   │<─ redirect_uri?code=xxx ──────│
+   │                               │
+   │── POST /oauth/token ─────────>│ 200 (交换 Bearer Token)
+   │<─ {access_token: "..."} ──────│
+   │                               │
+   │── POST /mcp (Bearer token) ──>│ 200 (MCP 会话建立)
+   │<─ tools: [breath, hold...] ───│
+```
+
+**注意事项**：
+- 弹出的授权页是你自己的 Ombre Brain 服务器，不是第三方
+- 密码就是你的 Dashboard 密码
+- Token 有效期 30 天，过期后会自动重新授权
+- 同一账号第一次授权后，之后的连接自动使用存储的 token
+
+#### 步骤 3：工具分布（两个连接器）
+
+Ombre Brain 出于 claude.ai 的 5 工具限制将工具拆成 **两个 MCP 端点**：
+
+| 端点 | 工具 | 说明 |
+|---|---|---|
+| `/mcp` | `breath` `hold` `grow` `dream` `trace` | 高频工具（5 个），日常主要用这个 |
+| `/mcp-extra` | `anchor` `release` `pulse` `plan` `letter_write` `letter_read` `I` | 低频工具（7 个） |
+
+在 Claude.ai / 你的客户端里分别添加这 **两个连接器**，即可使用全部 12 个工具：
+
+```
+http(s)://<你的地址>:18001/mcp
+http(s)://<你的地址>:18001/mcp-extra
+```
+
+> **`<你的地址>` 填什么？**
+> - **本机访问**：`http://localhost:18001/mcp`（`deploy/docker-compose.yml` 默认映射到 18001 端口；Docker Hub 镜像默认 8000）
+> - **直连 VPS 公网 IP**：`http://你的服务器IP:18001/mcp`
+> - **用了 Cloudflare Tunnel / 自有域名**：把 `<你的地址>:18001` 整段换成你的网址，且通常不带端口、走 https，例如 `https://ombre.example.com/mcp` 和 `https://ombre.example.com/mcp-extra`
+>
+> 端口以你实际的端口映射为准（见 `docker-compose` 里的 `ports`）。两个端点共用同一进程、同一端口，只是路径不同。
+
+#### 步骤 4：Claude Code（终端）远程连接
+
+Claude Code 同样支持 OAuth 远程 MCP，但 **本地使用推荐 stdio**（更简单，无需 OAuth）：
+
+```bash
+# 本地 stdio（推荐）
+claude mcp add ombre-brain python /path/to/server.py
+
+# 远程 HTTPS（需要 OAuth，同 Claude.ai 流程）
+claude mcp add ombre-brain --transport http https://ombre.example.com/mcp
+```
+
+---
+
+### 方式三：接入自有前端 / 自定义客户端（关闭 OAuth）
+
+适合：想把 Ombre Brain 接进**自己的前端**、或用 **GPT / GLM / 自定义脚本**等不走 OAuth 流程的客户端调用 MCP 工具。
+
+默认情况下，HTTPS 连接 `/mcp` 会**强制 OAuth 2.1**（这是 Claude.ai 网页版的要求）。自定义客户端往往不实现这套流程，于是工具调用会被 401 卡住。把鉴权关掉即可免认证直连：
+
+```bash
+# 方式 A：环境变量（Docker 用户最方便，优先级最高）
+OMBRE_MCP_REQUIRE_AUTH=false
+
+# 方式 B：config.yaml
+mcp_require_auth: false
+```
+
+改完**重启服务**即可。之后 `/mcp` 与 `/mcp-extra` 不再要求 Bearer token，任何客户端都能直连。
+
+> ⚠️ **安全提醒**：关闭后，任何能访问到该端点的人都能读写记忆。请确保服务**不直接裸奔在公网**——放在内网、或在反代（nginx / Cloudflare Access 等）层另加一道鉴权。需要公网且用 Claude.ai 时，保持默认 `true` 走 OAuth 更安全。
+
+---
+
+## 从源码部署 / Deploy from Source
+
+适合想自己改代码或部署到 VPS 的用户。
 
 ```bash
 git clone https://github.com/P0luz/Ombre-Brain.git
 cd Ombre-Brain
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
-**第二步：创建 `.env` 文件**
-
-在项目目录下新建一个叫 `.env` 的文件（注意有个点），内容填：
-
-```
-OMBRE_API_KEY=你的API密钥
-```
-
-> **🔑 推荐免费方案：Google AI Studio**
-> 1. 打开 [aistudio.google.com/apikey](https://aistudio.google.com/apikey)，登录 Google 账号
-> 2. 点击「Create API key」生成一个 key
-> 3. 把 key 填入 `.env` 文件的 `OMBRE_API_KEY=` 后面
-> 4. 免费额度（请以官网实时信息为准）：
->    - **脱水/打标模型**（`gemini-2.5-flash-lite`）：免费层 30 req/min
->    - **向量化模型**（`gemini-embedding-001`）：免费层 1500 req/day，3072 维
-> 5. 在 `config.yaml` 中 `dehydration.base_url` 设为 `https://generativelanguage.googleapis.com/v1beta/openai`
->
-> 也支持 DeepSeek、Ollama、LM Studio、vLLM 等任意 OpenAI 兼容 API。
->
-> **Recommended free option: Google AI Studio**
-> 1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and create an API key
-> 2. Free tier (as of 2025, check official site for current limits):
->    - Dehydration model (`gemini-2.5-flash-lite`): 30 req/min free
->    - Embedding model (`gemini-embedding-001`): 1500 req/day free, 3072 dims
-> 3. Set `dehydration.base_url` to `https://generativelanguage.googleapis.com/v1beta/openai` in `config.yaml`
-> Also supports DeepSeek, Ollama, LM Studio, vLLM, or any OpenAI-compatible API.
-
-没有 API key 则脱水压缩和自动打标功能不可用（会报错），但记忆的读写和检索仍正常工作。如果暂时不用脱水功能，可以留空：
-
-```
-OMBRE_API_KEY=
-```
-
-**第三步：配置 `docker-compose.yml`（指向你的 Obsidian Vault）**
-
-用文本编辑器打开 `docker-compose.yml`，找到这一行：
-
-```yaml
-- ./buckets:/data
-```
-
-改成你的 Obsidian Vault 里 `Ombre Brain` 文件夹的路径，例如：
-
-```yaml
-- /Users/你的用户名/Documents/Obsidian Vault/Ombre Brain:/data
-```
-
-> 不知道路径？在 Obsidian 里右键那个文件夹 → 「在访达中显示」，然后把地址栏的路径复制过来。
-> 不想挂载 Obsidian 也行，保持 `./buckets:/data` 不动，数据会存在项目目录的 `buckets/` 文件夹里。
-
-**第四步：启动**
+验证：
 
 ```bash
-docker compose up -d
+docker logs ombre-brain   # 看到 "Uvicorn running on http://0.0.0.0:8000"
+curl http://localhost:18001/health   # docker-compose.yml 默认映射 18001:8000
 ```
 
-等它跑完，看到 `Started` 就好了。
+Dashboard：`http://localhost:18001`
 
-**验证是否正常运行：**
+**VPS 部署注意**：`deploy/docker-compose.yml` 默认端口是 `127.0.0.1:18001`（仅本机访问）。如果没有反代，可改为 `0.0.0.0:18001` 对外开放，再配合 Cloudflare Tunnel 或 nginx 反代到 443。
 
-```bash
-docker logs ombre-brain
-```
-
-看到 `Uvicorn running on http://0.0.0.0:8000` 说明成功了。
-
-浏览器打开前端 Dashboard：**http://localhost:18001/dashboard**（`docker-compose.yml` 默认端口映射 `18001:8000`）
-
----
-
-**接入 Claude.ai（远程访问）**
-
-需要额外配置 Cloudflare Tunnel，把服务暴露到公网。参考下面「接入 Claude.ai (远程)」章节。
-
-**接入 Claude Desktop（本地）**
-
-不需要 Docker，直接用 Python 本地跑。参考下面「安装 / Setup」章节。
-
----
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/P0luz/Ombre-Brain)
-[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/OMBRE-BRAIN?referralCode=P0luz)
-[![Docker Hub](https://img.shields.io/docker/v/p0luz/ombre-brain?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/p0luz/ombre-brain)
-
----
-
-## 它是什么 / What is this
-
-Claude 没有跨对话记忆。每次对话结束，之前聊过的所有东西都会消失。
-
-Ombre Brain 给了它一套持久记忆——不是那种冷冰冰的键值存储，而是带情感坐标的、会自然衰减的、像人类记忆一样会遗忘和浮现的系统。
-
-Claude has no cross-conversation memory. Everything from a previous chat vanishes once it ends.
-
-Ombre Brain gives it persistent memory — not cold key-value storage, but a system with emotional coordinates, natural decay, and forgetting/surfacing mechanics that loosely mimic how human memory works.
-
-核心特点 / Key features:
-
-- **情感坐标打标 / Emotional tagging**: 每条记忆用 Russell 环形情感模型的 valence（效价）和 arousal（唤醒度）两个连续维度标记。不是"开心/难过"这种离散标签。
-  Each memory is tagged with two continuous dimensions from Russell's circumplex model: valence and arousal. Not discrete labels like "happy/sad".
-
-- **双通道检索 / Dual-channel search**: 关键词模糊匹配 + 向量语义相似度并联检索。关键词通道用 rapidfuzz 做模糊匹配；语义通道用 embedding（默认 `gemini-embedding-001`，3072 维）计算 cosine similarity，能在"今天很累"这种没有精确关键词的查询里找到"身体不适"、"睡眠问题"等语义相关记忆。两个通道去重合并，token 预算截断。
-  Keyword fuzzy matching + vector semantic similarity in parallel. Keyword channel uses rapidfuzz; semantic channel uses embeddings (default `gemini-embedding-001`, 3072 dims) with cosine similarity — finds semantically related memories even without exact keyword matches (e.g. "feeling tired" → "health issues", "sleep problems"). Results are deduplicated and truncated by token budget.
-
-- **自然遗忘 / Natural forgetting**: 改进版艾宾浩斯遗忘曲线。不活跃的记忆自动衰减归档，高情绪强度的记忆衰减更慢。
-  Modified Ebbinghaus forgetting curve. Inactive memories naturally decay and archive. High-arousal memories decay slower.
-
-- **权重池浮现 / Weight pool surfacing**: 记忆不是被动检索的，它们会主动浮现——未解决的、情绪强烈的记忆权重更高，会在对话开头自动推送。
-  Memories aren't just passively retrieved — they actively surface. Unresolved, emotionally intense memories carry higher weight and get pushed at conversation start.
-
-- **记忆重构 / Memory reconstruction**: 检索时根据当前情绪状态微调记忆的 valence 展示值（±0.1），模拟人类"此刻的心情影响对过去的回忆"的认知偏差。
-  During retrieval, memory valence display is subtly shifted (±0.1) based on current mood, simulating the human cognitive bias of "current mood colors past memories".
-
-- **Obsidian 原生 / Obsidian-native**: 每个记忆桶就是一个 Markdown 文件，YAML frontmatter 存元数据。可以直接在 Obsidian 里浏览、编辑、搜索。自动注入 `[[双链]]`。
-  Each memory bucket is a Markdown file with YAML frontmatter. Browse, edit, and search directly in Obsidian. Wikilinks are auto-injected.
-
-- **API 脱水 + 缓存 / API dehydration + cache**: 脱水压缩和自动打标通过 LLM API（DeepSeek / Gemini 等）完成，结果缓存到本地 SQLite（`dehydration_cache.db`），相同内容不重复调用 API。向量检索不可用时降级到 fuzzy matching。
-  Dehydration and auto-tagging are done via LLM API (DeepSeek / Gemini etc.), with results cached locally in SQLite (`dehydration_cache.db`) to avoid redundant API calls. Embedding search degrades to fuzzy matching when unavailable.
-
-- **历史对话导入 / Conversation history import**: 将过去与 Claude / ChatGPT / DeepSeek 等的对话批量导入为记忆桶。支持 Claude JSON 导出、ChatGPT 导出、Markdown、纯文本等格式，分块处理带断点续传，通过 Dashboard「导入」Tab 操作。
-  Batch-import past conversations (Claude / ChatGPT / DeepSeek etc.) as memory buckets. Supports Claude JSON export, ChatGPT export, Markdown, and plain text. Chunked processing with resume support, via the Dashboard "Import" tab.
-
-## 边界说明 / Design boundaries
-
-官方记忆功能已经在做身份层的事了——你是谁，你有什么偏好，你们的关系是什么。那一层交给它，Ombre Brain不打算造重复的轮子。
-
-Ombre Brain 的边界是时间里发生的事，不是你是谁。它记住的是：你们聊过什么，经历了什么，哪些事情还悬在那里没有解决。两层配合用，才是完整的。
-
-每次新对话，Claude 从零开始——但它能从 Ombre Brain 里找回跟你有关的一切。不是重建，是接续。
-
----
-
-Official memory already handles the identity layer — who you are, what you prefer, what your relationship is. That layer belongs there. Ombre Brain isn't trying to duplicate it.
-
-Ombre Brain's boundary is *what happened in time*, not *who you are*. It holds conversations, experiences, unresolved things. The two layers together are what make it feel complete.
-
-Each new conversation starts fresh — but Claude can reach back through Ombre Brain and find everything that happened between you. Not a rebuild. A continuation.
-
-## 架构 / Architecture
-
-```
-Claude ←→ MCP Protocol ←→ server.py
-                              │
-              ┌───────────────┼───────────────┐
-              │               │               │
-        bucket_manager   dehydrator     decay_engine
-         (CRUD + 搜索)    (压缩 + 打标)   (遗忘曲线)
-              │               │
-        Obsidian Vault   embedding_engine
-       (Markdown files)  (向量语义检索)
-                              │
-                         embeddings.db
-                         (SQLite, 3072-dim)
-```
-
-### 检索架构 / Search Architecture
-
-```
-breath(query="今天很累")
-         │
-    ┌────┴────┐
-    │         │
- Channel 1  Channel 2
- 关键词匹配   向量语义
- (rapidfuzz)  (cosine similarity)
-    │         │
-    └────┬────┘
-         │
-    去重 + 合并
-    token 预算截断
-         │
-    [语义关联] 标注 vector 来源
-         │
-    返回 ≤20 条结果
-```
-
-6 个 MCP 工具 / 6 MCP tools:
-
-| 工具 Tool | 作用 Purpose |
-|-----------|-------------|
-| `breath` | 浮现或检索记忆。无参数=推送未解决记忆；有参数=关键词+向量语义双通道检索。支持 domain/valence/arousal 过滤 / Surface or search memories. No args = surface unresolved; with query = keyword + vector dual-channel search. Supports domain/valence/arousal filters |
-| `hold` | 存储单条记忆，自动打标+合并相似桶+生成 embedding。`feel=True` 写模型自己的感受 / Store a single memory with auto-tagging, merging, and embedding. `feel=True` for model's own reflections |
-| `grow` | 日记归档，自动拆分长内容为多个记忆桶，每个桶自动生成 embedding / Diary digest, auto-split into multiple buckets with embeddings |
-| `trace` | 修改元数据、标记已解决、删除 / Modify metadata, mark resolved, delete |
-| `pulse` | 系统状态 + 所有记忆桶列表 / System status + bucket listing |
-| `dream` | 对话开头自省消化——读最近记忆，有沉淀写 feel，能放下就 resolve / Self-reflection at conversation start |
-
-## 安装 / Setup
-
-### 环境要求 / Requirements
-
-- Python 3.11+
-- 一个 Obsidian Vault（可选，不用也行，会在项目目录下自建 `buckets/`）
-  An Obsidian vault (optional — without one, it uses a local `buckets/` directory)
-
-### 步骤 / Steps
+### 不用 Docker（纯 Python）
 
 ```bash
 git clone https://github.com/P0luz/Ombre-Brain.git
 cd Ombre-Brain
 
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-```
 
-复制配置文件并按需修改 / Copy config and edit as needed:
-
-```bash
 cp config.example.yaml config.yaml
+python src/server.py
 ```
 
-如果你要用 API 做脱水压缩和自动打标（推荐，效果好很多），设置环境变量：
-If you want API-powered dehydration and tagging (recommended, much better quality):
+---
 
-```bash
-export OMBRE_API_KEY="your-api-key"
-```
-
-支持任何 OpenAI 兼容 API。在 `config.yaml` 里改 `base_url` 和 `model` 就行。
-Supports any OpenAI-compatible API. Just change `base_url` and `model` in `config.yaml`.
-
-> **💡 向量化检索（Embedding）**
-> Ombre Brain 内置双通道检索：关键词匹配 + 向量语义搜索。每次 `hold`/`grow` 存入记忆时自动生成 embedding 并存入 `embeddings.db`（SQLite）。
-> 推荐：**Google AI Studio 的 `gemini-embedding-001`**（免费，1500 次/天，3072 维向量）。在 `config.yaml` 的 `embedding` 部分配置。
-> 不配置 embedding 也能用，系统会降级到纯 fuzzy matching 模式。
->
-> **已有存量桶需要补生成 embedding**：运行 `backfill_embeddings.py`：
-> ```bash
-> OMBRE_API_KEY="your-key" python backfill_embeddings.py --batch-size 20
-> ```
-> Docker 用户：`docker exec -e OMBRE_BUCKETS_DIR=/data ombre-brain python3 backfill_embeddings.py --batch-size 20`
->
-> **Embedding support**: Built-in dual-channel search: keyword + vector semantic. Embeddings are auto-generated on each `hold`/`grow` and stored in `embeddings.db` (SQLite). Recommended: **Google AI Studio `gemini-embedding-001`** (free, 1500 req/day, 3072-dim). Configure in `config.yaml` under `embedding`. Without it, falls back to fuzzy matching. For existing buckets, run `backfill_embeddings.py`.
-
-### 接入 Claude Desktop / Connect to Claude Desktop
-
-在 Claude Desktop 配置文件中添加（macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`）：
-
-Add to your Claude Desktop config:
-
-```json
-{
-  "mcpServers": {
-    "ombre-brain": {
-      "command": "python",
-      "args": ["/path/to/Ombre-Brain/server.py"],
-      "env": {
-        "OMBRE_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-### 接入 Claude.ai (远程) / Connect to Claude.ai (remote)
-
-需要 HTTP 传输 + 隧道。可以用 Docker：
-Requires HTTP transport + tunnel. Docker setup:
-
-```bash
-echo "OMBRE_API_KEY=your-api-key" > .env
-docker-compose up -d
-```
-
-`docker-compose.yml` 里配好了 Cloudflare Tunnel。你需要自己在 `~/.cloudflared/` 下放凭证和路由配置。
-The `docker-compose.yml` includes Cloudflare Tunnel. You'll need your own credentials under `~/.cloudflared/`.
-
-### 指向 Obsidian / Point to Obsidian
-
-在 `config.yaml` 里设置 `buckets_dir`：
-Set `buckets_dir` in `config.yaml`:
-
-```yaml
-buckets_dir: "/path/to/your/Obsidian Vault/Ombre Brain"
-```
-
-不设的话，默认用项目目录下的 `buckets/`。
-If not set, defaults to `buckets/` in the project directory.
-
-## 配置 / Configuration
-
-所有参数在 `config.yaml`（从 `config.example.yaml` 复制）。关键的几个：
-All parameters in `config.yaml` (copy from `config.example.yaml`). Key ones:
-
-| 参数 Parameter | 说明 Description | 默认 Default |
-|---|---|---|
-| `transport` | `stdio`（本地）/ `streamable-http`（远程）| `stdio` |
-| `buckets_dir` | 记忆桶存储路径 / Bucket storage path | `./buckets/` |
-| `dehydration.model` | 脱水用的 LLM 模型 / LLM model for dehydration | `deepseek-chat` |
-| `dehydration.base_url` | API 地址 / API endpoint | `https://api.deepseek.com/v1` |
-| `embedding.enabled` | 启用向量语义检索 / Enable embedding search | `true` |
-| `embedding.model` | Embedding 模型 / Embedding model | `gemini-embedding-001` |
-| `decay.lambda` | 衰减速率，越大越快忘 / Decay rate | `0.05` |
-| `decay.threshold` | 归档阈值 / Archive threshold | `0.3` |
-| `merge_threshold` | 合并相似度阈值 (0-100) / Merge similarity | `75` |
-
-敏感配置用环境变量：
-Sensitive config via env vars:
-- `OMBRE_API_KEY` — LLM API 密钥
-- `OMBRE_TRANSPORT` — 覆盖传输方式
-- `OMBRE_BUCKETS_DIR` — 覆盖存储路径
-- `OMBRE_DASHBOARD_PASSWORD` — Dashboard 访问密码（可选，见下）
-
-## Dashboard 认证 / Dashboard Auth
-
-自 v1.3.0 起，Dashboard 和所有 `/api/*` 端点均受密码保护。
-Since v1.3.0, the Dashboard and all `/api/*` endpoints are password-protected.
-
-**首次访问**：若未设置密码，浏览器会弹出设置向导，填写并确认密码后即可使用。
-**First visit**: If no password is set, a setup wizard will appear. Enter and confirm a password to get started.
-
-**通过环境变量预设密码**：在 `docker-compose.user.yml` 中添加：
-**Pre-set via env var** in your `docker-compose.user.yml`:
-```yaml
-environment:
-  - OMBRE_DASHBOARD_PASSWORD=your_password_here
-```
-设置后，Dashboard 的"修改密码"功能将被禁用，必须通过环境变量修改。
-When set, the in-Dashboard password change is disabled — modify the env var directly.
-
-完整环境变量说明见 [ENV_VARS.md](ENV_VARS.md)。
-Full env var reference: [ENV_VARS.md](ENV_VARS.md).
-
-## 衰减公式 / Decay Formula
-
-$$final\_score = Importance \times activation\_count^{0.3} \times e^{-\lambda \times days} \times combined\_weight \times resolved\_factor \times urgency\_boost$$
-
-### 短期/长期权重分离 / Short-term vs Long-term Weight Separation
-
-系统对记忆的权重计算采用**分段策略**，模拟人类记忆的时效特征：
-The system uses a **segmented weighting strategy** that mimics how human memory prioritizes:
-
-| 阶段 Phase | 时间范围 | 权重分配 | 直觉解释 |
-|---|---|---|---|
-| 短期 Short-term | ≤ 3 天 | 时间 70% + 情感 30% | 刚发生的事，鲜活度最重要 |
-| 长期 Long-term | > 3 天 | 情感 70% + 时间 30% | 时间淡了，情感强度决定能记多久 |
-
-$$combined\_weight = \begin{cases} time\_weight \times 0.7 + emotion\_weight \times 0.3 & \text{if } days \leq 3 \\ emotion\_weight \times 0.7 + time\_weight \times 0.3 & \text{if } days > 3 \end{cases}$$
-
-### 时间系数（新鲜度加成）/ Time Weight (Freshness Bonus)
-
-连续指数衰减，无跳变：
-Continuous exponential decay, no discontinuities:
-
-$$freshness = 1.0 + 1.0 \times e^{-t/36}$$
-
-| 距存入时间 Time since creation | 新鲜度乘数 Multiplier |
-|---|---|
-| 刚存入 (t=0) | ×2.0 |
-| 约 25 小时 | ×1.5 |
-| 约 50 小时 | ×1.25 |
-| 72 小时 (3天) | ×1.14 |
-| 1 周+ | ≈ ×1.0 |
-
-t 为小时，36 为衰减常数。老记忆不被惩罚（下限 ×1.0），新记忆获得额外加成。
-
-### 情感权重 / Emotion Weight
-
-$$emotion\_weight = base + arousal \times arousal\_boost$$
-
-- 默认 `base=1.0`, `arousal_boost=0.8`
-- arousal=0.3（平静）→ 1.24；arousal=0.9（激动）→ 1.72
-
-### 权重池修正因子 / Weight Pool Modifiers
-
-| 状态 State | 修正因子 Factor | 说明 |
-|---|---|---|
-| 未解决 Unresolved | ×1.0 | 正常权重 |
-| 已解决 Resolved | ×0.05 | 沉底，等关键词唤醒 |
-| 已解决+已消化 Resolved+Digested | ×0.02 | 加速淡化，归档为无限小 |
-| 高唤醒+未解决 Urgent | ×1.5 | arousal>0.7 的未解决记忆额外加权 |
-| 钉选 Pinned | 999.0 | 不衰减、不合并、importance=10 |
-| Feel | 50.0 | 固定分数，不参与衰减 |
-
-### 参数说明 / Parameters
-
-- `importance`: 1-10，记忆重要性 / memory importance
-- `activation_count`: 被检索的次数，越常被想起衰减越慢 / retrieval count; more recalls = slower decay
-- `days`: 距上次激活的天数 / days since last activation
-- `arousal`: 唤醒度，越强烈的记忆越难忘 / arousal; intense memories are harder to forget
-- `λ` (decay_lambda): 衰减速率，默认 0.05 / decay rate, default 0.05
-
-## Dreaming 与 Feel / Dreaming & Feel
-
-### Dreaming — 做梦
-每次新对话开始时，Claude 会自动执行 `dream()`——读取最近的记忆桶，用第一人称思考：哪些事还有重量？哪些可以放下了？
-
-At the start of each conversation, Claude runs `dream()` — reads recent memory buckets and reflects in first person: what still carries weight? What can be let go?
-
-- 值得放下的 → `trace(resolved=1)` 让它沉底
-- 有沉淀的 → 写 `feel`，记录模型自己的感受
-- 没有沉淀就不写，不强迫产出
-
-### Feel — 带走的东西
-Feel 不是事件记录，是**模型带走的东西**——一句感受、一个未解答的问题、一个观察到的变化。
-
-Feel is not an event log — it's **what the model carries away**: a feeling, an unanswered question, a noticed change.
-
-- `hold(content="...", feel=True, source_bucket="源记忆ID", valence=模型自己的感受)`
-- `valence` 是模型的感受，不是事件情绪。同一段争吵，事件 V0.2，但模型可能 V0.4（「我从中看到了成长」）
-- `source_bucket` 指向被消化的记忆，会被标记为「已消化」→ 加速淡化到无限小，但不会被删除
-- Feel 不参与普通浮现、不衰减、不参与 dreaming
-- 用 `breath(domain="feel")` 读取之前的 feel
-
-### 对话启动完整流程 / Conversation Start Sequence
-```
-1. breath()              — 睁眼，看有什么浮上来
-2. dream()               — 消化最近记忆，有沉淀写 feel
-3. breath(domain="feel") — 读之前的 feel
-4. 开始和用户说话
-```
-
-## 给 Claude 的使用指南 / Usage Guide for Claude
-
-`CLAUDE_PROMPT.md` 是写给 Claude 看的使用说明。放到你的 system prompt 或 custom instructions 里就行。
-
-`CLAUDE_PROMPT.md` is the usage guide written for Claude. Put it in your system prompt or custom instructions.
-
-## 工具脚本 / Utility Scripts
-
-| 脚本 Script | 用途 Purpose |
-|---|---|
-| `embedding_engine.py` | 向量化引擎，管理 embedding 的生成、存储、相似度搜索 / Embedding engine: generate, store, and search embeddings |
-| `backfill_embeddings.py` | 为存量桶批量生成 embedding / Batch-generate embeddings for existing buckets |
-| `write_memory.py` | 手动写入记忆，绕过 MCP / Manually write memories, bypass MCP |
-| `migrate_to_domains.py` | 迁移平铺文件到域子目录 / Migrate flat files to domain subdirs |
-| `reclassify_domains.py` | 基于关键词重分类 / Reclassify by keywords |
-| `reclassify_api.py` | 用 API 重打标未分类桶 / Re-tag uncategorized buckets via API |
-| `test_tools.py` | MCP 工具集成测试（8 项） / MCP tool integration tests (8 tests) |
-| `test_smoke.py` | 冒烟测试 / Smoke test |
-
-## 部署 / Deploy
-
-### Docker Hub 预构建镜像
-
-[![Docker Hub](https://img.shields.io/docker/v/p0luz/ombre-brain?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/p0luz/ombre-brain)
-
-不用 clone 代码、不用 build，直接拉取预构建镜像：
-
-```bash
-docker pull p0luz/ombre-brain:latest
-curl -O https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/docker-compose.user.yml
-echo "OMBRE_API_KEY=你的key" > .env
-docker compose -f docker-compose.user.yml up -d
-```
-
-验证：`curl http://localhost:8000/health`
-Dashboard：浏览器打开 `http://localhost:8000/dashboard`
+## 部署到云平台 / Deploy to Cloud Platforms
 
 ### Render
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/P0luz/Ombre-Brain)
 
-> ⚠️ **免费层不可用**：Render 免费层**不支持持久化磁盘**，服务重启后记忆数据会丢失，且会在无流量时休眠。**必须使用 Starter（$7/mo）或以上**才能正常使用。
-> **Free tier won't work**: Render free tier has **no persistent disk** — all memory data is lost on restart. It also sleeps on inactivity. **Starter plan ($7/mo) or above is required.**
+> ⚠️ **免费层不可用**：Render 免费层无持久化磁盘，重启后记忆会丢失，且无流量时会休眠。**必须使用 Starter（$7/mo）或以上**。
 
-项目根目录已包含 `render.yaml`，点击按钮后：
-1. 设置 `OMBRE_API_KEY`：任何 OpenAI 兼容 API 的 key（**必需**，未设置时 hold/grow 会报错、仅检索类工具可用）
-2. （可选）设置 `OMBRE_BASE_URL`：API 地址，支持任意 OpenAI 化地址，如 `https://api.deepseek.com/v1` / `http://123.1.1.1:7689/v1` / `http://your-ollama:11434/v1`
-3. Render 自动挂载持久化磁盘到 `/opt/render/project/src/buckets`
-4. Dashboard：`https://<你的服务名>.onrender.com/dashboard`
-5. 部署后 MCP URL：`https://<你的服务名>.onrender.com/mcp`
+仓库已包含 `render.yaml`。点按钮后：
 
-`render.yaml` is included. After clicking the button:
-1. `OMBRE_API_KEY`: any OpenAI-compatible key (**required** for hold/grow; without it those tools raise an error)
-2. (Optional) `OMBRE_BASE_URL`: any OpenAI-compatible endpoint, e.g. `https://api.deepseek.com/v1`, `http://123.1.1.1:7689/v1`, `http://your-ollama:11434/v1`
-3. Persistent disk auto-mounts at `/opt/render/project/src/buckets`
-4. Dashboard: `https://<your-service>.onrender.com/dashboard`
-5. MCP URL after deploy: `https://<your-service>.onrender.com/mcp`
+1. 设置环境变量 `OMBRE_COMPRESS_API_KEY`（必需）
+2. 可选 `OMBRE_COMPRESS_BASE_URL`（例如 `https://generativelanguage.googleapis.com/v1beta/openai/`）和 `OMBRE_EMBED_API_KEY`
+3. 持久化磁盘自动挂载到 `/opt/render/project/src/buckets`
+4. 部署后 Dashboard：`https://<服务名>.onrender.com`，MCP URL：`https://<服务名>.onrender.com/mcp`
+
+Render 自带 HTTPS，可直接在 Claude.ai 添加，无需额外 Tunnel。
 
 ### Zeabur
 
-> 💡 **Zeabur 的定价模式**：Zeabur 是「买 VPS + 平台托管」，你先购买一台服务器（最低腾讯云新加坡 $2/mo、火山引擎 $3/mo），Volume 直接挂在该服务器上，**数据天然持久化，无丢失问题**。另需订阅 Zeabur 管理方案（Developer $5/mo），总计约 $7-8/mo 起。
-> **Zeabur pricing model**: You buy a VPS first (cheapest: Tencent Cloud Singapore ~$2/mo, Volcano Engine ~$3/mo), then add Zeabur's Developer plan ($5/mo) for management. Volumes mount directly on your server — **data is always persistent, no cold-start data loss**. Total ~$7-8/mo minimum.
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/OMBRE-BRAIN)
 
-**步骤 / Steps：**
+1. Fork 本仓库 → Zeabur **New Project** → **Deploy from GitHub**
+2. Variables 填 `OMBRE_COMPRESS_API_KEY`（必填）
+3. Volumes → 挂载路径 `/app/buckets`
+4. Networking → Port `8000` → **Generate Domain**
 
-1. **创建项目 / Create project**
-   - 打开 [zeabur.com](https://zeabur.com) → 购买一台服务器 → **New Project** → **Deploy from GitHub**
-   - 先 Fork 本仓库到自己 GitHub 账号，然后在 Zeabur 选择 `你的用户名/Ombre-Brain`
-   - Zeabur 会自动检测到根目录的 `Dockerfile` 并使用 Docker 方式构建
-   - Go to [zeabur.com](https://zeabur.com) → buy a server → **New Project** → **Deploy from GitHub**
-   - Fork this repo first, then select `your-username/Ombre-Brain` in Zeabur
-   - Zeabur auto-detects the `Dockerfile` in root and builds via Docker
+### 自有 VPS
 
-2. **设置环境变量 / Set environment variables**（服务页面 → **Variables** 标签页）
-   - `OMBRE_API_KEY`（**必需**）— LLM API 密钥；未设置时 hold/grow/dream 会报错
-   - `OMBRE_BASE_URL`（可选）— API 地址，如 `https://api.deepseek.com/v1`
+```bash
+git clone https://github.com/P0luz/Ombre-Brain.git
+cd Ombre-Brain
+cp config.example.yaml config.yaml
+# 修改 config.yaml 设置 API key 和其他参数
+docker compose -f deploy/docker-compose.yml up -d
+```
 
-   > ⚠️ **不需要**手动设置 `OMBRE_TRANSPORT` 和 `OMBRE_BUCKETS_DIR`，Dockerfile 里已经设好了默认值。Zeabur 对单阶段 Dockerfile 会自动注入控制台设置的环境变量。
-   > You do **NOT** need to set `OMBRE_TRANSPORT` or `OMBRE_BUCKETS_DIR` — defaults are baked into the Dockerfile. Zeabur auto-injects dashboard env vars for single-stage Dockerfiles.
-
-3. **挂载持久存储 / Mount persistent volume**（服务页面 → **Volumes** 标签页）
-   - Volume ID：填 `ombre-buckets`（或任意名）
-   - 挂载路径 / Path：**`/app/buckets`**
-   - ⚠️ 不挂载的话，每次重新部署记忆数据会丢失
-   - ⚠️ Without this, memory data is lost on every redeploy
-
-4. **配置端口 / Configure port**（服务页面 → **Networking** 标签页）
-   - Port Name：`web`（或任意名）
-   - Port：**`8000`**
-   - Port Type：**`HTTP`**
-   - 然后点 **Generate Domain** 生成一个 `xxx.zeabur.app` 域名
-   - Then click **Generate Domain** to get a `xxx.zeabur.app` domain
-
-5. **验证 / Verify**
-   - 访问 `https://<你的域名>.zeabur.app/health`，应返回 JSON
-   - Visit `https://<your-domain>.zeabur.app/health` — should return JSON
-   - Dashboard：`https://<你的域名>.zeabur.app/dashboard`
-   - 最终 MCP 地址 / MCP URL：`https://<你的域名>.zeabur.app/mcp`
-
-**常见问题 / Troubleshooting：**
-
-| 现象 Symptom | 原因 Cause | 解决 Fix |
-|---|---|---|
-| 域名无法访问 / Domain unreachable | 没配端口 / Port not configured | Networking 标签页加 port 8000 (HTTP) |
-| 域名无法访问 / Domain unreachable | `OMBRE_TRANSPORT` 未设置，服务以 stdio 模式启动，不监听任何端口 / Service started in stdio mode — no port is listened | **Variables 标签页确认设置 `OMBRE_TRANSPORT=streamable-http`，然后重新部署** |
-| 构建失败 / Build failed | Dockerfile 未被识别 / Dockerfile not detected | 确认仓库根目录有 `Dockerfile`（大小写敏感） |
-| 服务启动后立刻退出 | `OMBRE_TRANSPORT` 被覆盖为 `stdio` | 检查 Variables 里有没有多余的 `OMBRE_TRANSPORT=stdio`，删掉即可 |
-| 重启后记忆丢失 / Data lost on restart | Volume 未挂载 | Volumes 标签页挂载到 `/app/buckets` |
-
-### 使用 Cloudflare Tunnel 或 ngrok 连接 / Connecting via Cloudflare Tunnel or ngrok
-
-> ℹ️ 自 v1.1 起，server.py 在 HTTP 模式下已自动添加 CORS 中间件，无需额外配置。
-> Since v1.1, server.py automatically enables CORS middleware in HTTP mode — no extra config needed.
-
-使用隧道连接时，确保以下条件满足：
-When connecting via tunnel, ensure:
-
-1. **服务器必须运行在 HTTP 模式** / Server must use HTTP transport
-   ```bash
-   OMBRE_TRANSPORT=streamable-http python server.py
-   ```
-   或 Docker：
-   ```bash
-   docker-compose up -d
-   ```
-
-2. **在 Claude.ai 网页版添加 MCP 服务器** / Adding to Claude.ai web
-   - URL 格式 / URL format: `https://<tunnel-subdomain>.trycloudflare.com/mcp`
-   - 或 ngrok / or ngrok: `https://<xxxx>.ngrok-free.app/mcp`
-   - 先访问 `/health` 验证连接 / Verify first: `https://<your-tunnel>/health` should return `{"status":"ok",...}`
-
-3. **已知限制 / Known limitations**
-   - Cloudflare Tunnel 免费版有空闲超时（约 10 分钟），系统内置保活 ping 可缓解但不能完全消除
-   - Free Cloudflare Tunnel has idle timeout (~10 min); built-in keepalive pings mitigate but can't fully prevent it
-   - ngrok 免费版有请求速率限制 / ngrok free tier has rate limits
-   - 如果连接仍失败，检查隧道是否正在运行、服务是否以 `streamable-http` 模式启动
-   - If connection still fails, verify the tunnel is running and the server started in `streamable-http` mode
-
-| 现象 Symptom | 原因 Cause | 解决 Fix |
-|---|---|---|
-| 网页版无法连接隧道 URL / Web can't connect to tunnel URL | 服务以 stdio 模式运行 / Server in stdio mode | 设置 `OMBRE_TRANSPORT=streamable-http` 后重启 |
-| 网页版无法连接隧道 URL / Web can't connect to tunnel URL | 旧版 server.py 缺少 CORS 头 / Missing CORS headers | 拉取最新代码，CORS 已内置 / Pull latest — CORS is now built-in |
-| `/health` 返回 200 但 MCP 连不上 / `/health` 200 but MCP fails | 路径错误 / Wrong path | MCP URL 末尾必须是 `/mcp` 而非 `/` |
-| 隧道连接偶尔断开 / Tunnel disconnects intermittently | Cloudflare Tunnel 空闲超时 / Idle timeout | 保活 ping 已内置，若仍断开可缩短隧道超时配置 |
+配合 nginx / Caddy 反代到 443 端口，或直接用 Dashboard 内置的 Cloudflare Tunnel 管理器。
 
 ---
 
-### Session Start Hook（自动 breath）
+## Dashboard 功能概览
 
-部署后，如果你使用 Claude Code，可以在项目内激活自动浮现 hook：
-`.claude/settings.json` 已配置好 `SessionStart` hook，每次新会话或恢复会话时自动触发 `breath`，把最高权重未解决记忆推入上下文。
+启动后浏览器打开 `/`（根路径）进入，第一次会引导设置密码。
 
-**仅在远程 HTTP 模式下有效**（`OMBRE_TRANSPORT=streamable-http`）。本地 stdio 模式下 hook 会安静退出，不影响正常使用。
+| 标签页 | 功能 |
+|---|---|
+| **记忆** | 桶列表，按 domain / type 筛选，单桶可 pin / resolve / archive / delete |
+| **Breath 调试** | 模拟检索查询，查看每个桶的四维评分分解 |
+| **记忆网络** | 基于 embedding 相似度的桶关系图 |
+| **③ 引擎** | 内联填写 LLM / Embedding API Key，在线修改参数，点「保存 Key」立即热更新 |
+| **导入** | 上传历史对话文件批量导入 |
+| **设置** | 修改密码、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
 
-可以通过 `OMBRE_HOOK_URL` 环境变量指定服务器地址（默认 `http://localhost:8000`），或者设置 `OMBRE_HOOK_SKIP=1` 临时禁用。
+**设置页 Cloudflare Tunnel 区**：填入 Token 后点启动，状态点颜色表示连接状态（灰=未运行，橙=连接中，绿=已连接，红=连接失败+错误原因）。支持「启动时自动连接」。
 
-If using Claude Code, `.claude/settings.json` configures a `SessionStart` hook that auto-calls `breath` on each new or resumed session, surfacing your highest-weight unresolved memories as context. Only active in remote HTTP mode. Set `OMBRE_HOOK_SKIP=1` to disable temporarily.
+**API Key 测试按钮**：填入 Gemini API Key 后点「测试」，立即验证 Key 是否有效，显示 ✓ 或具体错误原因，无需手写测试请求。
+
+---
+
+## 配置 / Configuration
+
+所有可调参数都在 `config.yaml`（从 `config.example.yaml` 复制）。最常用的几个：
+
+| 参数 | 说明 | 推荐值 |
+|---|---|---|
+| `transport` | `stdio`（本地）/ `streamable-http`（远程） | Docker 部署用 `streamable-http` |
+| `dehydration.model` | 脱水/打标 LLM 模型 | `gemini-2.0-flash` |
+| `dehydration.base_url` | LLM API 地址 | `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| `dehydration.max_tokens` | 模型最大输出 token | `4096`（必须足够大，否则 JSON 截断导致域分类失败） |
+| `embedding.api_format` | `gemini`（云端）/ `ollama`（本地 bge-m3）/ `openai_compat` | `gemini` |
+| `embedding.model` | embedding 模型 | 云端 `gemini-embedding-001` / 本地 `bge-m3` |
+| `decay.lambda` | 衰减速率，越大越快忘 | `0.05` |
+| `merge_threshold` | 合并相似度阈值 (0-100) | `75` |
+
+> ⚠️ **`dehydration.max_tokens` 不能太小**：Gemini 2.5 系列模型有「思考 token」开销，如果 max_tokens 设得太小（如 256/512），思考 token 会耗尽预算，JSON 响应被截断，导致所有记忆被错误分类为「未分类」。推荐 `gemini-2.0-flash`（无思考开销）或将 max_tokens 设为 `4096` 以上。
+
+### Embedding 两后端：云端 Gemini vs 本地 bge-m3
+
+| 后端 | 类型 | 维度 | 资源 | 适合 |
+|---|---|---|---|---|
+| **云端**（`api_format: gemini`） | Gemini API | 3072 | 0（不占本机） | 大多数人。免费额度 1500 req/day 够用，开箱即用 |
+| **本地**（`api_format: ollama`） | Ollama + bge-m3 | 1024 | **约 2–3GB 空闲内存** + 1.2GB 磁盘，纯 CPU | 不想出网 / 没有 API key / 数据敏感 / 自托管 |
+
+> 💾 **本地模型内存提醒**：bge-m3 加载后常驻约 2–3GB 内存。低配机器（<2GB 空闲内存）建议继续用云端；纯 CPU 即可推理，首条查询冷启动约 1–9s，之后 <0.5s。
+
+> 🧩 **用硅基流动（SiliconFlow）等 OpenAI 兼容云端向量化**：
+> **最省事：在 Dashboard ③ 引擎 → 向量化 顶部的「服务商预设」里选『硅基流动』**，会自动把 Base URL 和正确的模型名填好，你只要填 key → 保存 → 测试。脱水(LLM) 面板同理有预设。
+>
+> 想手动填也行（**两个最常踩的坑都在这**）：
+> - 格式：`OpenAI 兼容`
+> - Base URL：`https://api.siliconflow.cn/v1` —— **末尾必须带 `/v1`**，漏了会 404（page not found）
+> - Model：`BAAI/bge-m3` —— **必须带 `BAAI/` 前缀**，只写 `bge-m3` 会报 `Model does not exist`（免费，1024 维）
+> - 填完点「保存」，再点旁边的「**测试**」确认连得通（会直接显示成功维度或具体错误）。其它 OpenAI 兼容商（DeepSeek 等）同理：base_url 带正确后缀、model 用对方控制台里的完整名。
+
+**本地向量化怎么搭（离线、无需 key、不出网）**
+
+本地模型跑在一个独立的 `ollama` 容器里（OB 不直接管它，所以最稳）。两步：
+
+1. **启动自带的 ollama 容器**（一次性）。Docker 用户版 compose 已内置该服务（默认不启），加 `--profile local` 即可拉起：
+   ```bash
+   docker compose -f docker-compose.user.yml --profile local up -d
+   ```
+   > 源码部署同理；或独立起一个（和 OB 同一 docker 网络、容器名 `ombre-ollama` 即可）：
+   > ```bash
+   > docker run -d --name ombre-ollama --restart unless-stopped \
+   >   --network <OB所在网络> -v ollama:/root/.ollama ollama/ollama
+   > ```
+   OB 在容器网络里通过 `ombre-ollama:11434` 自动连它（代码已内置该默认，无需额外配置）。
+2. **Dashboard → 设置 → 向量化 → 「🖥️ 本地向量模型」面板 → 点「🚀 一键本地化」**。它会自动：下载 bge-m3（约 1.2GB，带进度条）→ 切换后端 → 后台重算全库向量。期间照常使用，检索暂用旧库。
+   > 裸机 / 非 Docker 部署：同一个按钮会**直接在本机免提权安装 Ollama 运行时**（Win/Linux/mac），无需你手动起容器。
+
+> 🌐 **国内网络**：模型下载默认走 ollama 官方源。拉不动时，在面板「分步操作」里换下载镜像（选 ModelScope 或填自定义 registry 前缀），再点「仅下载」。
+
+**云端 ↔ 本地随时切换**：Dashboard → 设置 → 向量化面板 →「一键搭建本地向量化」或「切回云端 Gemini」。
+
+> ⚠️ 两个后端向量维度不同（3072 vs 1024），**每次切换都会全库重算**（自动备份旧 DB、后台进行、失败不动旧库）。不要频繁来回切。
+
+---
+
+## 把记忆挂到 Obsidian
+
+打开 `docker-compose.user.yml`，把 `./buckets:/data` 改成你的 Vault 路径：
+
+```yaml
+- /Users/你的用户名/Documents/Obsidian Vault/Ombre Brain:/data
+```
+
+重启后每条记忆就是 Vault 里一个 Markdown 文件，可在 Obsidian 直接浏览编辑。
+
+---
 
 ## 更新 / How to Update
 
-不同部署方式的更新方法。
-
-Different update procedures depending on your deployment method.
-
-### Docker Hub 预构建镜像用户 / Docker Hub Pre-built Image
+### Docker Hub 镜像用户
 
 ```bash
-# 拉取最新镜像
 docker pull p0luz/ombre-brain:latest
-
-# 重启容器（记忆数据在 volume 里，不会丢失）
 docker compose -f docker-compose.user.yml down
 docker compose -f docker-compose.user.yml up -d
 ```
 
-> 你的记忆数据挂载在 `./buckets:/data`，pull + restart 不会影响已有数据。
-> Your memory data is mounted at `./buckets:/data` — pull + restart won't affect existing data.
-
-### 从源码部署用户 / Source Code Deploy (Docker)
+### 从源码部署用户
 
 ```bash
 cd Ombre-Brain
-
-# 拉取最新代码
 git pull origin main
-
-# 重新构建并重启
-docker compose down
-docker compose build
-docker compose up -d
+docker compose -f deploy/docker-compose.yml down
+docker compose -f deploy/docker-compose.yml build
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
-> `docker compose build` 会重新构建镜像。volume 挂载的记忆数据不受影响。
-> `docker compose build` rebuilds the image. Volume-mounted memory data is unaffected.
+记忆数据在 volume 里，更新不会丢失。
 
-### 本地 Python 用户 / Local Python (no Docker)
+---
 
-```bash
-cd Ombre-Brain
+## 给 Claude 的使用指南
 
-# 拉取最新代码
-git pull origin main
+`docs/CLAUDE_PROMPT.md` 是写给 Claude 看的工具使用约定。把它放进 system prompt / custom instructions / Claude Desktop 项目说明里即可。
 
-# 更新依赖（如有新增）
-pip install -r requirements.txt
+---
 
-# 重启服务
-# Ctrl+C 停止旧进程，然后：
-python server.py
-```
+## 常见问题 / Troubleshooting
 
-### Render
-
-Render 连接了你的 GitHub 仓库，**自动部署**：
-
-1. 如果你 Fork 了仓库 → 在 GitHub 上同步上游更新（Sync fork），Render 会自动重新部署
-2. 或者手动：Render Dashboard → 你的服务 → **Manual Deploy** → **Deploy latest commit**
-
-> 持久化磁盘（`/opt/render/project/src/buckets`）上的记忆数据在重新部署时保留。
-> Persistent disk data at `/opt/render/project/src/buckets` is preserved across deploys.
-
-### Zeabur
-
-Zeabur 也连接了你的 GitHub 仓库：
-
-1. 在 GitHub 上同步 Fork 的最新代码 → Zeabur 自动触发重新构建部署
-2. 或者手动：Zeabur Dashboard → 你的服务 → **Redeploy**
-
-> Volume 挂载在 `/app/buckets`，重新部署时数据保留。
-> Volume mounted at `/app/buckets` — data persists across redeploys.
-
-### VPS / 自有服务器 / Self-hosted VPS
-
-```bash
-cd Ombre-Brain
-
-# 拉取最新代码
-git pull origin main
-
-# 方式 A：Docker 部署
-docker compose down
-docker compose build
-docker compose up -d
-
-# 方式 B：直接 Python 运行
-pip install -r requirements.txt
-# 重启你的进程管理器（systemd / supervisord / pm2 等）
-sudo systemctl restart ombre-brain   # 示例
-```
-
-> **通用注意事项 / General notes:**
-> - 更新不会影响你的记忆数据（存在 volume 或 buckets 目录里）
-> - 如果 `requirements.txt` 有变化，Docker 用户重新 build 即可自动处理；非 Docker 用户需手动 `pip install -r requirements.txt`
-> - 更新后访问 `/health` 验证服务正常
-> - Updates never affect your memory data (stored in volumes or buckets directory)
-> - If `requirements.txt` changed, Docker rebuild handles it automatically; non-Docker users need `pip install -r requirements.txt`
-> - After updating, visit `/health` to verify the service is running
-
-## 测试 / Testing
-
-测试套件覆盖规格书所有场景（场景 01–11），以及 B-01 至 B-10 全部 bug 修复的回归测试。
-
-The test suite covers all spec scenarios (01–11) and regression tests for every bug fix (B-01 to B-10).
-
-### 快速运行 / Quick Start
-
-```bash
-pip install pytest pytest-asyncio
-pytest tests/                          # 全部测试
-pytest tests/unit/                     # 单元测试
-pytest tests/integration/             # 集成测试（场景全流程）
-pytest tests/regression/              # 回归测试（B-01..B-10）
-pytest tests/ -k "B01"               # 单个回归测试
-pytest tests/ -v                       # 详细输出
-```
-
-### 测试层级 / Test Layers
-
-| 目录 Directory | 内容 Contents |
-|---|---|
-| `tests/unit/` | 单独测试 calculate_score、topic_score、时间得分、CRUD 等核心函数 |
-| `tests/integration/` | 场景全流程：冷启动、hold、search、trace、decay、feel 等 11 个场景 |
-| `tests/regression/` | 每个 bug（B-01 至 B-10）独立回归测试，含边界条件 |
-
-### 回归测试覆盖 / Regression Coverage
-
-| 文件 | Bug | 核心断言 |
+| 现象 | 可能原因 | 解决 |
 |---|---|---|
-| `test_issue_B01.py` | resolved 桶不再自动归档 | `update(resolved=True)` 后桶留在 `dynamic/`，搜索仍可命中，得分 ×0.05 |
-| `test_issue_B03.py` | float activation_count 不被 int() 截断 | 1.3 > 1.0 得分，`_time_ripple` 写入 0.3 增量 |
-| `test_issue_B04.py` | create() 初始 activation_count=0 | 新建桶满足冷启动条件，touch() 后变 1 |
-| `test_issue_B05.py` | 时间衰减系数 0.02（原 0.1）| 30天 ≈ 0.549，非旧值 0.049 |
-| `test_issue_B06.py` | w_time 默认 1.5（原 2.5）| `BucketManager.w_time == 1.5` |
-| `test_issue_B07.py` | content_weight 默认 1.0（原 3.0）| 名字完全匹配得分 > 内容模糊匹配 |
-| `test_issue_B08.py` | auto_resolve 同轮应用降权因子 | stale meta 修复后 score ×0.05 立即生效 |
-| `test_issue_B09.py` | hold() 保留用户传入的 valence/arousal | 用户值优先于 analyze() 结果 |
-| `test_issue_B10.py` | feel 桶 domain=[] 不被填充 | feel 桶保持 `[]`；dynamic 桶正确填 `["未分类"]` |
+| 首次进 Dashboard 设置密码页一闪而过变成登录页 | 已修复（v2.0.4+） | 更新到最新版本 |
+| 所有记忆 domain 显示「未分类」 | `max_tokens` 太小，JSON 被截断 | 在 Dashboard ③ 引擎 或 `config.yaml` 将 `dehydration.max_tokens` 设为 `4096`；推荐用 `gemini-2.0-flash` 而非 2.5 系列 |
+| Claude.ai 添加 MCP 报「Couldn't register」 | OAuth 端点无法访问（通常是 Tunnel 未启动/域名错误） | 先确认 Dashboard 能正常访问，再添加 MCP |
+| OAuth 授权页正常弹出但密码输入后报错 | Dashboard 密码错误 | 使用 Dashboard 设置时的密码（不是 Cloudflare 密码） |
+| 连接成功但「no tools available」 | 连接到了 `/mcp-extra` 但期望 `/mcp`，或反之 | 检查 URL 末尾是 `/mcp` 还是 `/mcp-extra`；分别添加两个连接器 |
+| 主路由 `/mcp` 正常但副路由 `/mcp-extra` 502 / 连不上 | 反代或 Cloudflare Tunnel 只放行了 `/mcp`，没放行 `/mcp-extra`（OB 进程内两条路由是对称的，本机直连都返回 200） | 确认 Tunnel/Nginx 的 ingress 是按主机名整体转发到 `localhost:端口`（覆盖所有路径），不要只给 `/mcp` 单独建路径规则；两条都要能从公网访问 |
+| 向量化不生效 / 语义检索没结果（压缩却正常） | base_url 漏 `/v1`（→404）、model 漏 `BAAI/` 前缀（→Model does not exist），或在 Dashboard 改了 key 没重建引擎 | 用 Dashboard 向量化区的「测试」按钮自查；按上面「用硅基流动…」一节填对 base_url 与 model；错误详情见设置页错误面板（OB-E001） |
+| 自有前端 / GPT / GLM 调用 MCP 工具被 401 卡住 | 默认强制 OAuth，自定义客户端不走该流程 | 设 `OMBRE_MCP_REQUIRE_AUTH=false`（或 `config.yaml: mcp_require_auth: false`）后重启；详见「方式三：接入自有前端」 |
+| Token 过期后无法自动重连 | Bearer token 默认 30 天有效 | 在 Claude.ai connector 设置里重新授权 |
+| Dashboard 401 | 未登录 / 密码错 | 浏览器重新登录 |
+| `hold` / `grow` 报 API key 错误 | LLM key 未配置 | Dashboard → ③ 引擎 填入 Key 点「保存 Key」，立即热更新 |
+| 重启后记忆丢失 | Volume 没挂载 | 检查 docker-compose volume 配置 |
+| Tunnel 状态红色 / 连接失败 | Token 无效或 cloudflared 报错 | 展开 Dashboard 红色错误框查看 cloudflared 输出；重新从 Cloudflare Zero Trust 获取 token |
+| 隧道连接偶尔断 | Cloudflare Free 闲置超时 | 内置 keepalive 已缓解；可在 Cloudflare Tunnel 设置里调整超时 |
 
-> **测试隔离**：所有测试运行在 `tmp_path` 临时目录，绝不触碰真实记忆数据。
-> **Test isolation**: All tests run in `tmp_path` — your real memory data is never touched.
+---
+
+## 容易忽略的点 / Easy-to-miss
+
+新用户最常踩、但文档里分散各处的点，集中提醒一下：
+
+- **两个连接器都要加**：只加 `/mcp` 会少 7 个工具（含 `I`），`/mcp-extra` 也得单独加一遍。
+- **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，别只给 `/mcp` 建路径规则，否则 `/mcp-extra` 会 502 / 连不上。
+- **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
+- **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
+- **`dehydration.max_tokens` 别设太小**：Gemini 2.5 系列有思考 token 开销，太小会让 JSON 截断、记忆全标成「未分类」；用 `gemini-2.0-flash` 或把它设到 `4096` 以上。
+- **记忆数据要挂 volume**：不挂载（或 Render 免费层无持久磁盘）→ 重启记忆全丢。重要数据可再开 GitHub 同步兜底（embeddings.db 不上传，靠「重算所有向量」恢复）。
+- **切换向量化后端会全库重算**：云端 3072 维和本地 bge-m3 1024 维不通用，每次切换都会重算，别频繁来回切。
+- **热更新按钮看部署方式**：Docker（有 restart 策略）点完自动恢复；裸机/纯 Python 需要 systemd/pm2 等守护，否则更新后要手动重启。点之前先「导出记忆备份」。
+- **自有前端 / GPT / GLM 接入**：默认强制 OAuth，会卡住非 Claude 客户端；设 `OMBRE_MCP_REQUIRE_AUTH=false` 关掉（注意别裸奔公网）。
+- **首次访问先设密码**：设完之后所有 `/api/*` 都要登录；忘了密码可用设置里的安全问题急救。
 
 ---
 

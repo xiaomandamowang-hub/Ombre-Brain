@@ -14,12 +14,10 @@ openai>=1.0.0
 
 # YAML 配置解析
 pyyaml>=6.0
+types-PyYAML>=6.0
 
 # Markdown frontmatter 解析（桶文件读写）
 python-frontmatter>=1.1.0
-
-# 中文分词
-jieba>=0.42.1
 
 # 异步 HTTP 客户端（应用层保活 ping）
 httpx>=0.27.0
@@ -27,3 +25,8 @@ httpx>=0.27.0
 # 向量相似度计算 (导入模式/聚类)
 numpy>=1.24.0
 scikit-learn>=1.2.0
+
+# BM25 稀疏检索 + 中文分词（软依赖，缺包时自动降级）
+rank-bm25>=0.2.2
+jieba>=0.42.1
+
