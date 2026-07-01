@@ -529,8 +529,19 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
     except Exception:
         extras = ""
     notice = _pop_deletion_notice()
+    # If the tool returned a dict (e.g. breath returns {"text": "..."}),
+    # append notice/extras into the "text" field rather than string-concatenating,
+    # so the dict schema required by ChatGPT's MCP output validation is preserved.
+    if isinstance(result, dict):
+        prefix = notice or ""
+        suffix = extras or ""
+        if prefix or suffix:
+            result = dict(result)
+            result["text"] = prefix + result.get("text", "") + suffix
+        return result
     body = (notice + result) if notice else result
     return body + extras if extras else body
+
 
 
 # =============================================================
@@ -574,7 +585,6 @@ _OAUTH_TOOL_META = {
     "securitySchemes": [{"type": "oauth2", "scopes": ["mcp"]}],
 }
 
-
 @mcp.tool(meta=_OAUTH_TOOL_META)
 async def breath(
     query: Optional[str] = "",
@@ -585,8 +595,8 @@ async def breath(
     max_results: Optional[int] = 0,
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
-) -> str:
-    """我睁眼看看自己记得什么。不传query=让权重最高的未解决记忆自己浮上来;传query=按关键词检索我记忆里相关的事。max_tokens=单次返回总token上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大50)。importance_min>=1=跳过语义,按重要度降序拉最多20条我标过的核心事项。tags逗号分隔,AND过滤;tags=\"feel\"或\"__feel__\"等价于domain=\"feel\"读我留下的所有feel。"""
+) -> dict:
+    """我睁眼看看自己记得什么。不传query=让权重最高的未解决记忆自己浮上来;传query=按关键词检索我记忆里相关的事。max_tokens=单次返回总token上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大50)。importance_min>=1=跳过语义,按重要度降序拉最多20条我标过的核心事项。tags逗号分隔,AND过滤;tags="feel"或"__feel__"等价于domain="feel"读我留下的所有feel。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
@@ -614,7 +624,7 @@ async def hold(
     arousal: Optional[float] = -1,
     why_remembered: Optional[str] = "",
 ) -> str:
-    """我把一件事/一个感受存进我的记忆。系统会自动打标并尝试合并近似的旧桶。tags逗号分隔,importance 1-10。pinned=True=钉为永久核心准则,不衰减不合并。feel=True=记下我的第一人称感受(不参与普通浮现,只通过 breath(domain=\"feel\") 读)。source_bucket=我正在消化的那个原始记忆桶ID,会被标为已消化加速淡化。why_remembered=为什么记得这一条（可选，自由文本，仅用于展示不计分）。"""
+    """我把一件事/一个感受存进我的记忆。系统会自动打标并尝试合并近似的旧桶。tags逗号分隔,importance 1-10。pinned=True=钉为永久核心准则,不衰减不合并。feel=True=记下我的第一人称感受(不参与普通浮现,只通过 breath(domain="feel") 读)。source_bucket=我正在消化的那个原始记忆桶ID,会被标为已消化加速淡化。why_remembered=为什么记得这一条（可选，自由文本，仅用于展示不计分）。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, tags=tags, importance=importance,
@@ -629,6 +639,8 @@ async def hold(
             "why_len": len(why_remembered or ""),
         },
     )
+
+
 
 
 @mcp.tool(meta=_OAUTH_TOOL_META)

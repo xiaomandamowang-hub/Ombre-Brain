@@ -43,7 +43,7 @@ async def dispatch(
     max_results: Optional[int] = 0,
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
-) -> str:
+) -> dict:
     # --- Null-safe coercion ---
     if query is None: query = ""
     if max_tokens is None: max_tokens = 0
@@ -74,34 +74,45 @@ async def dispatch(
         domain = "feel"
         tag_filter = [t for t in tag_filter if t not in ("feel", "__feel__")]
 
-    # --- Feel 通道优先：即使无 query 也直接拉 feel ---
-    if domain.strip().lower() == "feel":
-        return await surface_feels(max_tokens=max_tokens)
+    try:
+        # --- Feel 通道优先：即使无 query 也直接拉 feel ---
+        if domain.strip().lower() == "feel":
+            result = await surface_feels(max_tokens=max_tokens)
+        # --- importance_min 模式：跳过语义，按 importance 降序 ---
+        elif importance_min >= 1:
+            result = await surface_by_importance(
+                importance_min=importance_min,
+                max_results=max_results,
+                max_tokens=max_tokens,
+                tag_filter=tag_filter,
+            )
+        # --- 无 query：浮现模式 ---
+        elif not query or not query.strip():
+            result = await surface_default(
+                max_results=max_results,
+                max_tokens=max_tokens,
+                tag_filter=tag_filter,
+            )
+        # --- 有 query：检索模式 ---
+        else:
+            result = await surface_search(
+                query=query,
+                max_results=max_results,
+                max_tokens=max_tokens,
+                domain=domain,
+                valence=valence,
+                arousal=arousal,
+                tag_filter=tag_filter,
+            )
+    except Exception as e:
+        rt.logger.error(f"breath dispatch error: {type(e).__name__}: {e}", exc_info=True)
+        return {"text": f"检索记忆时发生错误: {type(e).__name__}: {e}"}
 
-    # --- importance_min 模式：跳过语义，按 importance 降序 ---
-    if importance_min >= 1:
-        return await surface_by_importance(
-            importance_min=importance_min,
-            max_results=max_results,
-            max_tokens=max_tokens,
-            tag_filter=tag_filter,
-        )
-
-    # --- 无 query：浮现模式 ---
-    if not query or not query.strip():
-        return await surface_default(
-            max_results=max_results,
-            max_tokens=max_tokens,
-            tag_filter=tag_filter,
-        )
-
-    # --- 有 query：检索模式 ---
-    return await surface_search(
-        query=query,
-        max_results=max_results,
-        max_tokens=max_tokens,
-        domain=domain,
-        valence=valence,
-        arousal=arousal,
-        tag_filter=tag_filter,
-    )
+    # Normalise: branch functions return str; wrap into the dict schema that
+    # ChatGPT's MCP client requires for tool output validation.
+    if result is None:
+        return {"text": "未检索到相关记忆。"}
+    if isinstance(result, dict):
+        # Already wrapped (future-proof if a branch is updated to return dict).
+        return result
+    return {"text": str(result)}
